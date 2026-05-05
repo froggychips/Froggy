@@ -9,15 +9,25 @@ struct FroggyDaemon {
         
         let vision = VisionActor()
         let vortex = VortexActor()
+        let mlx = MLXActor()
         
-        // Запуск захвата в фоновой задаче
-        let captureTask = Task {
-            await vision.startCapture()
+        // 1. Попытка загрузки модели (замени путь на актуальный для тебя)
+        do {
+            try await mlx.loadModel(modelPath: "/Users/yaroslav/models/mistral-7b-v0.3-4bit")
+            print("✅ Model loaded successfully.")
+        } catch {
+            print("❌ Failed to load model: \(error)")
         }
         
-        print("🚀 Systems online. Press Ctrl+C to stop.")
+        // 2. Запуск захвата
+        let _ = Task { await vision.startCapture() }
         
-        // Держим демон запущенным
+        // 3. Тестовый инференс
+        let response = await mlx.generate(prompt: "Explain how Apple Silicon is great:")
+        print("🤖 AI Response: \(response)")
+        
+        print("🚀 Systems online.")
+        
         while true {
             try? await Task.sleep(nanoseconds: 60 * 1_000_000_000)
             let pressure = await vortex.getMemoryPressure()

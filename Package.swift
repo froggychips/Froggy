@@ -3,38 +3,26 @@ import PackageDescription
 
 let package = Package(
     name: "Froggy",
-    platforms: [
-        .macOS(.v14)
-    ],
+    platforms: [.macOS(.v14)],
     products: [
         .executable(name: "FroggyDaemon", targets: ["FroggyDaemon"]),
         .library(name: "VortexCore", targets: ["VortexCore"]),
         .library(name: "LushaBridge", targets: ["LushaBridge"])
     ],
     dependencies: [
-        // Добавим зависимости для работы с MLX и системными API, когда они потребуются
+        .package(url: "https://github.com/ml-explore/mlx-swift", from: "0.20.0")
     ],
     targets: [
         .executableTarget(
             name: "FroggyDaemon",
-            dependencies: ["VortexCore", "LushaBridge"],
-            linkerSettings: [
-                .unsafeFlags(["-Xlinker", "-arch", "-Xlinker", "arm64"])
-            ]
-        ),
+            dependencies: ["VortexCore", "LushaBridge"]),
         .target(
             name: "VortexCore",
-            dependencies: [],
-            swiftSettings: [
-                .define("ARM64")
-            ]
-        ),
+            dependencies: [
+                .product(name: "MLX", package: "mlx-swift")
+            ]),
         .target(
             name: "LushaBridge",
-            dependencies: [],
-            swiftSettings: [
-                .define("ARM64")
-            ]
-        )
+            dependencies: [])
     ]
 )
