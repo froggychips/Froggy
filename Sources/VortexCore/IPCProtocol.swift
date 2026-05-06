@@ -45,6 +45,14 @@ public struct IPCResponse: Codable, Sendable {
     public var lines: [String]?
     public var accessors: [Accessor]?
     public var lastCaptureError: String?
+    /// Текущий уровень давления (`normal`/`warning`/`critical`) — для cmd `pressure`.
+    public var pressureLevel: String?
+    /// Pids, замороженные политикой tier-1 (warning).
+    public var tier1Frozen: [Int32]?
+    /// Pids, замороженные политикой tier-2 (critical).
+    public var tier2Frozen: [Int32]?
+    /// Сколько секунд держится текущий уровень.
+    public var secondsInLevel: Int?
     /// Маркер «это последний chunk в стриме». Для one-shot ответов — true.
     /// Для streaming-промежуточных chunk'ов — false.
     public var final: Bool?

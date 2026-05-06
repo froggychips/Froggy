@@ -7,8 +7,34 @@ final class ConfigTests: XCTestCase {
         XCTAssertNil(c.modelPath)
         XCTAssertNil(c.gpuMemoryLimitBytes)
         XCTAssertEqual(c.captureIntervalSeconds, 2)
-        XCTAssertFalse(c.freezeBundleIds.isEmpty)
+        XCTAssertFalse(c.freezeTier1BundleIds.isEmpty)
+        XCTAssertFalse(c.freezeTier2BundleIds.isEmpty)
+        XCTAssertEqual(c.pressureCooldownSeconds, 60)
+        XCTAssertNil(c.freezeBundleIds, "deprecated alias must default to nil")
         XCTAssertTrue(c.ipcSocketPath.hasSuffix("froggy.sock"))
+    }
+
+    /// Старый формат конфига с `freezeBundleIds` маппится в `freezeTier1BundleIds`.
+    func testLegacyFreezeBundleIdsMapsToTier1() throws {
+        let json = #"""
+        {"freezeBundleIds": ["legacy.app.one", "legacy.app.two"]}
+        """#
+        let cfg = try JSONDecoder().decode(FroggyConfig.self, from: Data(json.utf8))
+        XCTAssertEqual(cfg.freezeTier1BundleIds, ["legacy.app.one", "legacy.app.two"])
+        XCTAssertEqual(cfg.freezeBundleIds, ["legacy.app.one", "legacy.app.two"])
+        XCTAssertFalse(cfg.freezeTier2BundleIds.isEmpty)
+    }
+
+    /// Если в файле есть и старое, и новое поле — побеждает новое.
+    func testNewTier1WinsOverLegacy() throws {
+        let json = #"""
+        {
+          "freezeBundleIds": ["legacy.app"],
+          "freezeTier1BundleIds": ["new.app"]
+        }
+        """#
+        let cfg = try JSONDecoder().decode(FroggyConfig.self, from: Data(json.utf8))
+        XCTAssertEqual(cfg.freezeTier1BundleIds, ["new.app"])
     }
 
     func testRoundTripJSON() throws {
