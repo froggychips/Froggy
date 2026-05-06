@@ -9,19 +9,28 @@ public struct FroggyConfig: Codable, Sendable, Equatable {
     public var captureIntervalSeconds: Int
     public var freezeBundleIds: [String]
     public var ipcSocketPath: String
+    public var frameSimilarityThreshold: Double
+    public var contextWindowSize: Int
+    public var contextMaxChars: Int
 
     public init(
         modelPath: String? = nil,
         gpuMemoryLimitBytes: Int? = nil,
         captureIntervalSeconds: Int = 2,
         freezeBundleIds: [String] = FroggyConfig.defaultFreezeBundleIds,
-        ipcSocketPath: String = FroggyConfig.defaultSocketPath
+        ipcSocketPath: String = FroggyConfig.defaultSocketPath,
+        frameSimilarityThreshold: Double = 0.98,
+        contextWindowSize: Int = 30,
+        contextMaxChars: Int = 4096
     ) {
         self.modelPath = modelPath
         self.gpuMemoryLimitBytes = gpuMemoryLimitBytes
         self.captureIntervalSeconds = captureIntervalSeconds
         self.freezeBundleIds = freezeBundleIds
         self.ipcSocketPath = ipcSocketPath
+        self.frameSimilarityThreshold = frameSimilarityThreshold
+        self.contextWindowSize = contextWindowSize
+        self.contextMaxChars = contextMaxChars
     }
 
     public static let defaultFreezeBundleIds: [String] = [
@@ -45,6 +54,21 @@ public struct FroggyConfig: Codable, Sendable, Equatable {
 
     public static var defaultSocketPath: String {
         supportDirectory.appendingPathComponent("froggy.sock").path
+    }
+
+    // Custom decoder so older config.json files without the new fields still
+    // load — they'll just get the current defaults.
+    public init(from decoder: any Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        let d = FroggyConfig()
+        self.modelPath = try c.decodeIfPresent(String.self, forKey: .modelPath)
+        self.gpuMemoryLimitBytes = try c.decodeIfPresent(Int.self, forKey: .gpuMemoryLimitBytes)
+        self.captureIntervalSeconds = try c.decodeIfPresent(Int.self, forKey: .captureIntervalSeconds) ?? d.captureIntervalSeconds
+        self.freezeBundleIds = try c.decodeIfPresent([String].self, forKey: .freezeBundleIds) ?? d.freezeBundleIds
+        self.ipcSocketPath = try c.decodeIfPresent(String.self, forKey: .ipcSocketPath) ?? d.ipcSocketPath
+        self.frameSimilarityThreshold = try c.decodeIfPresent(Double.self, forKey: .frameSimilarityThreshold) ?? d.frameSimilarityThreshold
+        self.contextWindowSize = try c.decodeIfPresent(Int.self, forKey: .contextWindowSize) ?? d.contextWindowSize
+        self.contextMaxChars = try c.decodeIfPresent(Int.self, forKey: .contextMaxChars) ?? d.contextMaxChars
     }
 
     /// Loads config from `url`, returning defaults if the file is missing.
