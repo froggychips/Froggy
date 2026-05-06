@@ -12,6 +12,8 @@ public struct FroggyConfig: Codable, Sendable, Equatable {
     public var frameSimilarityThreshold: Double
     public var contextWindowSize: Int
     public var contextMaxChars: Int
+    public var contextDedupEnabled: Bool
+    public var contextDedupThreshold: Double
 
     public init(
         modelPath: String? = nil,
@@ -21,7 +23,9 @@ public struct FroggyConfig: Codable, Sendable, Equatable {
         ipcSocketPath: String = FroggyConfig.defaultSocketPath,
         frameSimilarityThreshold: Double = 0.98,
         contextWindowSize: Int = 30,
-        contextMaxChars: Int = 4096
+        contextMaxChars: Int = 4096,
+        contextDedupEnabled: Bool = true,
+        contextDedupThreshold: Double = 0.85
     ) {
         self.modelPath = modelPath
         self.gpuMemoryLimitBytes = gpuMemoryLimitBytes
@@ -31,6 +35,8 @@ public struct FroggyConfig: Codable, Sendable, Equatable {
         self.frameSimilarityThreshold = frameSimilarityThreshold
         self.contextWindowSize = contextWindowSize
         self.contextMaxChars = contextMaxChars
+        self.contextDedupEnabled = contextDedupEnabled
+        self.contextDedupThreshold = contextDedupThreshold
     }
 
     public static let defaultFreezeBundleIds: [String] = [
@@ -69,6 +75,8 @@ public struct FroggyConfig: Codable, Sendable, Equatable {
         self.frameSimilarityThreshold = try c.decodeIfPresent(Double.self, forKey: .frameSimilarityThreshold) ?? d.frameSimilarityThreshold
         self.contextWindowSize = try c.decodeIfPresent(Int.self, forKey: .contextWindowSize) ?? d.contextWindowSize
         self.contextMaxChars = try c.decodeIfPresent(Int.self, forKey: .contextMaxChars) ?? d.contextMaxChars
+        self.contextDedupEnabled = try c.decodeIfPresent(Bool.self, forKey: .contextDedupEnabled) ?? d.contextDedupEnabled
+        self.contextDedupThreshold = try c.decodeIfPresent(Double.self, forKey: .contextDedupThreshold) ?? d.contextDedupThreshold
     }
 
     /// Loads config from `url`, returning defaults if the file is missing.
