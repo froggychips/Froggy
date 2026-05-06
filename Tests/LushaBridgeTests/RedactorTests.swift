@@ -2,7 +2,7 @@ import XCTest
 @testable import LushaBridge
 
 final class RedactorTests: XCTestCase {
-    private let r = Redactor()
+    private let r = Redactor(loadUserRules: false)
 
     func testRedactsAWSKey() {
         let s = "key=AKIAIOSFODNN7EXAMPLE end"
@@ -72,5 +72,43 @@ final class RedactorTests: XCTestCase {
         let out = r.redact(lines)
         XCTAssertEqual(out[0], "safe")
         XCTAssertTrue(out[1].contains("[REDACTED-AWS-KEY]"))
+    }
+
+    func testCustomRulesAppliedAfterBuiltIn() {
+        let rules = Redactor.builtInRules + [
+            RedactionRule(name: "internal-id", pattern: "ACME-\\d{6}", replacement: "[REDACTED-CORP]")
+        ]
+        let custom = Redactor(rules: rules)
+        let out = custom.redact("ticket ACME-123456 has aws=AKIAIOSFODNN7EXAMPLE")
+        XCTAssertTrue(out.contains("[REDACTED-CORP]"))
+        XCTAssertTrue(out.contains("[REDACTED-AWS-KEY]"))
+    }
+
+    func testLoadsUserRulesFromDisk() throws {
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("rules-\(UUID()).json")
+        defer { try? FileManager.default.removeItem(at: url) }
+
+        let payload = [
+            RedactionRule(name: "test", pattern: "TOPSECRET-\\d+", replacement: "[REDACTED-TS]")
+        ]
+        let data = try JSONEncoder().encode(payload)
+        try data.write(to: url)
+
+        let loaded = Redactor.loadUserRules(from: url)
+        XCTAssertEqual(loaded?.count, 1)
+        XCTAssertEqual(loaded?.first?.name, "test")
+    }
+
+    func testCompiledOnceDoesNotRecompilePerCall() {
+        // Smoke-тест: 1000 redact'ов на одной инстанции не падают и
+        // отрабатывают за разумное время (<2 сек на M-чипе).
+        let lines = (0..<1000).map { _ in "key=AKIAIOSFODNN7EXAMPLE end" }
+        let start = Date()
+        let out = r.redact(lines)
+        let elapsed = Date().timeIntervalSince(start)
+        XCTAssertEqual(out.count, 1000)
+        XCTAssertTrue(out.allSatisfy { $0.contains("[REDACTED-AWS-KEY]") })
+        XCTAssertLessThan(elapsed, 2.0, "1000 redactions took \(elapsed)s — slower than expected")
     }
 }
