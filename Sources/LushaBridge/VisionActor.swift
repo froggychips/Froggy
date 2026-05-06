@@ -1,86 +1,132 @@
-import Foundation
-import Vision
 import CoreGraphics
+import Foundation
+import os
 import ScreenCaptureKit
+import Vision
 
-/// Актер для управления состоянием и OCR-процессами.
-/// Обеспечивает потокобезопасность в соответствии со стандартами Swift 6.
-actor VisionActor {
+/// Снимки экрана + OCR. Все мутации состояния — через actor.
+public actor VisionActor {
+    private static let log = Logger(subsystem: "com.froggychips.froggy", category: "vision")
+    private static let isoStyle = Date.ISO8601FormatStyle(includingFractionalSeconds: true)
+
     private var isCapturing = false
     private let stateFilePath: URL
-    
-    init() {
-        let homeDir = FileManager.default.homeDirectoryForCurrentUser
-        self.stateFilePath = homeDir.appendingPathComponent(".froggy_state.json")
+    private let captureInterval: Duration
+
+    public init(captureInterval: Duration = .seconds(2)) {
+        self.captureInterval = captureInterval
+        let supportDir = FileManager.default
+            .urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("Froggy", isDirectory: true)
+        try? FileManager.default.createDirectory(
+            at: supportDir,
+            withIntermediateDirectories: true,
+            attributes: [.posixPermissions: 0o700]
+        )
+        self.stateFilePath = supportDir.appendingPathComponent("state.json")
     }
-    
-    /// Запуск цикла захвата и анализа
-    func startCapture() async {
+
+    public func stateFileURL() -> URL { stateFilePath }
+
+    /// Запускает цикл захвата. Кооперативно реагирует на `Task.isCancelled`,
+    /// поэтому отмена внешней Task сразу прервёт цикл.
+    public func startCapture() async {
         guard !isCapturing else { return }
         isCapturing = true
-        
-        print("[VisionActor] Starting capture loop on ARM64...")
-        
-        while isCapturing {
-            autoreleasepool {
-                performCaptureCycle()
+        Self.log.info("capture loop started")
+
+        defer {
+            isCapturing = false
+            Self.log.info("capture loop stopped")
+        }
+
+        while isCapturing && !Task.isCancelled {
+            await runCycle()
+            do {
+                try await Task.sleep(for: captureInterval)
+            } catch {
+                break // отмена
             }
-            try? await Task.sleep(nanoseconds: 2 * 1_000_000_000) // 2 секунды интервал
         }
     }
-    
-    func stopCapture() {
+
+    public func stopCapture() {
         isCapturing = false
     }
-    
-    private func performCaptureCycle() {
-        // Здесь будет логика ScreenCaptureKit для ARM64
-        // Для MVP используем упрощенный захват основного дисплея
-        let displayID = CGMainDisplayID()
-        guard let image = CGDisplayCreateImage(displayID) else { return }
-        
-        processImage(image)
+
+    // MARK: - Capture
+
+    private func runCycle() async {
+        do {
+            guard let image = try await captureMainDisplay() else { return }
+            let strings = await Self.recognizeText(image: image)
+            await writeState(strings: strings)
+        } catch {
+            Self.log.error("capture cycle failed: \(error.localizedDescription)")
+        }
     }
-    
-    private func processImage(_ image: CGImage) {
-        let requestHandler = VNImageRequestHandler(cgImage: image, options: [:])
-        let request = VNRecognizeTextRequest { [weak self] request, error in
-            guard let observations = request.results as? [VNRecognizedTextObservation] else { return }
-            
-            let recognizedStrings = observations.compactMap { observation in
-                observation.topCandidates(1).first?.string
+
+    /// ScreenCaptureKit-захват главного дисплея. Заменяет deprecated `CGDisplayCreateImage`.
+    private func captureMainDisplay() async throws -> CGImage? {
+        let content = try await SCShareableContent.excludingDesktopWindows(
+            false, onScreenWindowsOnly: true
+        )
+        guard let display = content.displays.first else { return nil }
+        let filter = SCContentFilter(display: display, excludingWindows: [])
+        let config = SCStreamConfiguration()
+        config.width = display.width
+        config.height = display.height
+        config.showsCursor = false
+        return try await SCScreenshotManager.captureImage(
+            contentFilter: filter, configuration: config
+        )
+    }
+
+    // MARK: - OCR
+
+    /// Распознавание текста. `nonisolated` + `Sendable`-возврат, чтобы тяжёлая работа
+    /// не блокировала actor (Vision сам прыгнет в свой пул).
+    nonisolated private static func recognizeText(image: CGImage) async -> [String] {
+        await withCheckedContinuation { (continuation: CheckedContinuation<[String], Never>) in
+            let request = VNRecognizeTextRequest { req, _ in
+                let observations = (req.results as? [VNRecognizedTextObservation]) ?? []
+                let strings = observations.compactMap { $0.topCandidates(1).first?.string }
+                continuation.resume(returning: strings)
             }
-            
-            Task { [weak self] in
-                await self?.updateState(with: recognizedStrings)
+            request.recognitionLevel = .accurate
+            request.recognitionLanguages = ["ru-RU", "en-US"]
+            request.usesLanguageCorrection = true
+            let handler = VNImageRequestHandler(cgImage: image, options: [:])
+            do {
+                try handler.perform([request])
+            } catch {
+                Self.log.error("vision request failed: \(error.localizedDescription)")
+                continuation.resume(returning: [])
             }
         }
-        
-        request.recognitionLevel = .accurate
-        try? requestHandler.perform([request])
     }
-    
-    private func updateState(with strings: [String]) async {
-        let timestamp = ISO8601DateFormatter().string(from: Date())
-        let state: [String: Any] = [
-            "timestamp": timestamp,
+
+    // MARK: - State persistence
+
+    private func writeState(strings: [String]) async {
+        let payload: [String: Any] = [
+            "timestamp": Date.now.formatted(Self.isoStyle),
             "recognized_text": strings,
-            "architecture": "arm64"
+            "architecture": "arm64",
         ]
-        
-        await atomicWriteState(state)
-    }
-    
-    private func atomicWriteState(_ state: [String: Any]) async {
-        guard let data = try? JSONSerialization.data(withJSONObject: state, options: .prettyPrinted) else { return }
-        
-        let tempURL = stateFilePath.appendingPathExtension("tmp")
+        guard let data = try? JSONSerialization.data(
+            withJSONObject: payload, options: [.prettyPrinted, .sortedKeys]
+        ) else { return }
+
         do {
-            try data.write(to: tempURL)
-            try FileManager.default.replaceItemAt(stateFilePath, withItemAt: tempURL)
-            // print("[VisionActor] State updated atomically.")
+            try data.write(to: stateFilePath, options: [.atomic])
+            // Atomic write пересоздаёт файл; права надо выставить заново.
+            try FileManager.default.setAttributes(
+                [.posixPermissions: 0o600],
+                ofItemAtPath: stateFilePath.path
+            )
         } catch {
-            print("[VisionActor] Error writing state: \(error)")
+            Self.log.error("state write failed: \(error.localizedDescription)")
         }
     }
 }
