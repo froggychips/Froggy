@@ -69,8 +69,44 @@ public actor MLXActor {
 
     public func currentModelPath() -> String? { loadedModelPath }
 
-    /// Сгенерировать ответ. Бросает `MLXActorError.modelNotLoaded`, если `loadModel` не вызывался.
+    /// Сгенерировать полный ответ (one-shot). Бросает `MLXActorError.modelNotLoaded`,
+    /// если `loadModel` не вызывался.
     public func generate(prompt: String, maxTokens: Int = 200) async throws -> String {
+        var output = ""
+        for try await chunk in generateStream(prompt: prompt, maxTokens: maxTokens) {
+            output += chunk
+        }
+        return output
+    }
+
+    /// Streaming-вариант: возвращает `AsyncThrowingStream`, в который
+    /// токены попадают по мере генерации. Отмена внешней Task → прерывание.
+    public nonisolated func generateStream(
+        prompt: String,
+        maxTokens: Int = 200
+    ) -> AsyncThrowingStream<String, any Error> {
+        AsyncThrowingStream { continuation in
+            let task = Task {
+                do {
+                    try await self.runGeneration(
+                        prompt: prompt,
+                        maxTokens: maxTokens,
+                        continuation: continuation
+                    )
+                    continuation.finish()
+                } catch {
+                    continuation.finish(throwing: error)
+                }
+            }
+            continuation.onTermination = { _ in task.cancel() }
+        }
+    }
+
+    private func runGeneration(
+        prompt: String,
+        maxTokens: Int,
+        continuation: AsyncThrowingStream<String, any Error>.Continuation
+    ) async throws {
         guard let container else { throw MLXActorError.modelNotLoaded }
         let interval = Self.signposter.beginInterval("generate")
         defer { Self.signposter.endInterval("generate", interval) }
@@ -81,12 +117,11 @@ public actor MLXActor {
         let params = GenerateParameters(maxTokens: maxTokens, temperature: 0.7)
         let stream = try await container.generate(input: lmInput, parameters: params)
 
-        var output = ""
         for await event in stream {
+            if Task.isCancelled { break }
             if case let .chunk(text) = event {
-                output += text
+                continuation.yield(text)
             }
         }
-        return output
     }
 }
