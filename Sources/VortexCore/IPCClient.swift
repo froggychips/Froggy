@@ -23,8 +23,7 @@ public enum IPCClientError: Error, Sendable, CustomStringConvertible {
     }
 }
 
-/// Клиент к `IPCServer`-у демона. Однократный запрос ↔ один JSON-ответ.
-/// Используется MenuBar-приложением и любыми внешними тулзами на Swift.
+/// Клиент к `IPCServer`-у демона. One-shot send + streaming поверх AF_UNIX.
 public actor IPCClient {
     public let socketPath: String
 
@@ -32,20 +31,61 @@ public actor IPCClient {
         self.socketPath = socketPath
     }
 
+    /// One-shot. Ставит SO_RCVTIMEO/SO_SNDTIMEO на сокет — это гасит баг
+    /// «таймаут сработал, но blocking syscall всё ещё держит fd».
     public func send(_ request: IPCRequest, timeout: Duration = .seconds(30)) async throws -> IPCResponse {
         let path = socketPath
-        return try await withThrowingTaskGroup(of: IPCResponse.self) { group in
-            group.addTask {
-                try Self.synchronousSend(request: request, socketPath: path)
+        let timeoutSeconds = max(0.1, timeout.toSeconds)
+        return try await withCheckedThrowingContinuation { (cont: CheckedContinuation<IPCResponse, any Error>) in
+            Task.detached {
+                do {
+                    var capturedResponse: IPCResponse?
+                    try Self.synchronousSendStream(
+                        request: request,
+                        socketPath: path,
+                        timeoutSeconds: timeoutSeconds
+                    ) { response in
+                        capturedResponse = response
+                        return true // one-shot — после первого ответа всегда выходим
+                    }
+                    if let r = capturedResponse {
+                        cont.resume(returning: r)
+                    } else {
+                        cont.resume(throwing: IPCClientError.noResponse)
+                    }
+                } catch {
+                    cont.resume(throwing: error)
+                }
             }
-            group.addTask {
-                try await Task.sleep(for: timeout)
-                throw IPCClientError.noResponse
+        }
+    }
+
+    /// Streaming. Возвращает stream `IPCResponse`-ов; каждый — одна
+    /// JSON-строка от сервера. Заканчивается, когда приходит chunk с
+    /// `final == true`, либо сервер закрывает соединение.
+    public nonisolated func sendStream(
+        _ request: IPCRequest,
+        timeout: Duration = .seconds(300)
+    ) -> AsyncThrowingStream<IPCResponse, any Error> {
+        let path = socketPath
+        let timeoutSeconds = max(0.1, timeout.toSeconds)
+        return AsyncThrowingStream { continuation in
+            let task = Task.detached {
+                do {
+                    try Self.synchronousSendStream(
+                        request: request,
+                        socketPath: path,
+                        timeoutSeconds: timeoutSeconds
+                    ) { response in
+                        continuation.yield(response)
+                        return response.final == true
+                    }
+                    continuation.finish()
+                } catch {
+                    continuation.finish(throwing: error)
+                }
             }
-            // Берём первый исход и отменяем оставшийся таск.
-            let result = try await group.next()!
-            group.cancelAll()
-            return result
+            continuation.onTermination = { _ in task.cancel() }
         }
     }
 
@@ -56,7 +96,33 @@ public actor IPCClient {
     }
 
     public func generate(prompt: String, maxTokens: Int? = nil) async throws -> IPCResponse {
-        try await send(IPCRequest(cmd: "generate", prompt: prompt, maxTokens: maxTokens))
+        try await send(
+            IPCRequest(cmd: "generate", prompt: prompt, maxTokens: maxTokens),
+            timeout: .seconds(300)
+        )
+    }
+
+    /// Streaming-генерация: stream строк-токенов.
+    public nonisolated func generateStream(
+        prompt: String,
+        maxTokens: Int? = nil
+    ) -> AsyncThrowingStream<String, any Error> {
+        let req = IPCRequest(cmd: "generate", prompt: prompt, maxTokens: maxTokens)
+        let upstream = sendStream(req)
+        return AsyncThrowingStream { continuation in
+            let task = Task {
+                do {
+                    for try await response in upstream {
+                        if let text = response.text { continuation.yield(text) }
+                        if response.final == true { break }
+                    }
+                    continuation.finish()
+                } catch {
+                    continuation.finish(throwing: error)
+                }
+            }
+            continuation.onTermination = { _ in task.cancel() }
+        }
     }
 
     public func context(maxChars: Int? = nil) async throws -> IPCResponse {
@@ -64,7 +130,7 @@ public actor IPCClient {
     }
 
     public func loadModel(path: String) async throws -> IPCResponse {
-        try await send(IPCRequest(cmd: "loadModel", path: path))
+        try await send(IPCRequest(cmd: "loadModel", path: path), timeout: .seconds(600))
     }
 
     public func accessors() async throws -> IPCResponse {
@@ -89,12 +155,30 @@ public actor IPCClient {
 
     // MARK: - BSD socket plumbing
 
-    nonisolated private static func synchronousSend(
-        request: IPCRequest, socketPath: String
-    ) throws -> IPCResponse {
+    /// Открывает соединение, отправляет один запрос, читает строку-за-строкой.
+    /// Для каждой полученной строки вызывает `onResponse`. Если callback
+    /// возвращает true — завершаем (one-shot или final-маркер).
+    nonisolated fileprivate static func synchronousSendStream(
+        request: IPCRequest,
+        socketPath: String,
+        timeoutSeconds: Double,
+        onResponse: (IPCResponse) -> Bool
+    ) throws {
         let fd = socket(AF_UNIX, SOCK_STREAM, 0)
         if fd < 0 { throw IPCClientError.socketCreation(errno) }
         defer { close(fd) }
+
+        // SO_RCVTIMEO + SO_SNDTIMEO — гарантия, что blocking syscalls
+        // не залипнут навсегда, даже если демон умолк.
+        let secs = Int(timeoutSeconds)
+        let usecs = Int32((timeoutSeconds - Double(secs)) * 1_000_000)
+        var tv = timeval(tv_sec: secs, tv_usec: usecs)
+        _ = withUnsafePointer(to: &tv) { ptr in
+            setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, ptr, socklen_t(MemoryLayout<timeval>.size))
+        }
+        _ = withUnsafePointer(to: &tv) { ptr in
+            setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, ptr, socklen_t(MemoryLayout<timeval>.size))
+        }
 
         var addr = sockaddr_un()
         addr.sun_family = sa_family_t(AF_UNIX)
@@ -118,36 +202,49 @@ public actor IPCClient {
 
         var data = try JSONEncoder().encode(request)
         data.append(0x0A)
+        var writeErrno: Int32 = 0
         let written = data.withUnsafeBytes { ptr -> Int in
             guard let base = ptr.baseAddress else { return 0 }
             var w = 0
             while w < ptr.count {
                 let n = write(fd, base.advanced(by: w), ptr.count - w)
-                if n <= 0 { return w }
+                if n <= 0 { writeErrno = errno; return w }
                 w += n
             }
             return w
         }
-        if written != data.count { throw IPCClientError.write(errno) }
+        if written != data.count { throw IPCClientError.write(writeErrno) }
 
-        var collected = Data()
-        var buf = [UInt8](repeating: 0, count: 4096)
-        while !collected.contains(0x0A) {
-            let n = buf.withUnsafeMutableBufferPointer { p in
-                read(fd, p.baseAddress, p.count)
+        var buffer = Data()
+        var chunk = [UInt8](repeating: 0, count: 4096)
+        while !Task.isCancelled {
+            let n = chunk.withUnsafeMutableBufferPointer { ptr -> Int in
+                read(fd, ptr.baseAddress, ptr.count)
             }
-            if n == 0 { break }
+            if n == 0 { return } // EOF
             if n < 0 { throw IPCClientError.read(errno) }
-            collected.append(contentsOf: buf.prefix(n))
+            buffer.append(contentsOf: chunk.prefix(n))
+
+            while let nl = buffer.firstIndex(of: 0x0A) {
+                let endOffset = buffer.distance(from: buffer.startIndex, to: nl)
+                let line = Data(buffer.prefix(endOffset))
+                buffer.removeSubrange(buffer.startIndex...nl)
+                let response: IPCResponse
+                do {
+                    response = try JSONDecoder().decode(IPCResponse.self, from: line)
+                } catch {
+                    throw IPCClientError.decode(String(describing: error))
+                }
+                let stop = onResponse(response)
+                if stop { return }
+            }
         }
-        guard let nl = collected.firstIndex(of: 0x0A) else {
-            throw IPCClientError.noResponse
-        }
-        let line = collected.subdata(in: 0..<nl)
-        do {
-            return try JSONDecoder().decode(IPCResponse.self, from: line)
-        } catch {
-            throw IPCClientError.decode(String(describing: error))
-        }
+    }
+}
+
+private extension Duration {
+    var toSeconds: Double {
+        let comp = components
+        return Double(comp.seconds) + Double(comp.attoseconds) / 1e18
     }
 }

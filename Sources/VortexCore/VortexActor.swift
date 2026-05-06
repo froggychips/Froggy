@@ -18,27 +18,27 @@ public enum VortexError: Error, Sendable, CustomStringConvertible {
 }
 
 /// Управление процессами и ресурсами на Apple Silicon.
-/// Все мутации `suspendedPids` идут через actor — гарантирует sendability.
+/// Phase 4: валидация делегирована `ProcessClassifier` (default-deny по
+/// исполняемому пути), и каждое успешное замораживание персистится через
+/// `FrozenPidsStore` — на случай, если процесс упадёт раньше, чем доедет
+/// до `thawAll`.
 public actor VortexActor {
     private static let log = Logger(subsystem: "com.froggychips.froggy", category: "vortex")
 
-    /// Bundle IDs / executable names, которые запрещено когда-либо приостанавливать.
-    /// Остановка любого из них приведёт к зависанию или потере сессии пользователя.
-    private static let forbiddenExecutables: Set<String> = [
-        "launchd", "kernel_task", "WindowServer", "loginwindow",
-        "coreaudiod", "cfprefsd", "logd", "diskarbitrationd",
-        "powerd", "watchdogd", "configd", "notifyd",
-        "UserEventAgent", "distnoted", "syslogd",
-    ]
-
+    private let classifier: ProcessClassifier
+    private let pidStore: FrozenPidsStore?
     private var suspendedPids: Set<Int32> = []
 
-    public init() {}
+    public init(classifier: ProcessClassifier = ProcessClassifier(),
+                pidStore: FrozenPidsStore? = nil) {
+        self.classifier = classifier
+        self.pidStore = pidStore
+    }
 
     // MARK: - Memory pressure
 
-    /// Возвращает уровень давления на память в процентах (0-100), где 100 = занята вся физическая память.
-    /// Использует `host_statistics64(HOST_VM_INFO64)` — публичный API, без устаревших sysctl-ключей.
+    /// Возвращает уровень давления на память в процентах (0-100).
+    /// `host_statistics64(HOST_VM_INFO64)` — публичный API, без deprecated sysctl-ключей.
     public func getMemoryPressure() -> Int {
         let host = mach_host_self()
         defer { mach_port_deallocate(mach_task_self_, host) }
@@ -56,7 +56,6 @@ public actor VortexActor {
             return 0
         }
 
-        // "Used" приближаем как active + wired + compressed страницы.
         let used = UInt64(stats.active_count)
             + UInt64(stats.wire_count)
             + UInt64(stats.compressor_page_count)
@@ -67,25 +66,34 @@ public actor VortexActor {
 
     // MARK: - Process control
 
-    /// Замораживает процесс (`SIGSTOP`). Бросает `VortexError`, если pid в blacklist
-    /// либо не принадлежит текущему пользователю.
+    /// Замораживает процесс (`SIGSTOP`). Бросает `VortexError`, если
+    /// `ProcessClassifier` вернул `.forbidden`.
     @discardableResult
-    public func freezeProcess(pid: Int32) throws -> Int32 {
-        try validate(pid: pid)
+    public func freezeProcess(pid: Int32) async throws -> Int32 {
+        let verdict = classifier.classify(pid: pid)
+        let executablePath: String
+        switch verdict {
+        case .forbidden(let reason):
+            throw VortexError.forbiddenPid(pid: pid, reason: reason)
+        case .freezable(let path):
+            executablePath = path
+        }
+
         let rc = kill(pid, SIGSTOP)
         if rc != 0 {
             throw VortexError.killFailed(pid: pid, errno: errno)
         }
         suspendedPids.insert(pid)
+        await pidStore?.add(.init(pid: pid, executablePath: executablePath))
         Self.log.info("suspended pid=\(pid)")
         return pid
     }
 
-    /// Размораживает процесс (`SIGCONT`). Не бросает, если процесс уже не существует —
-    /// лишь снимает его с учёта.
-    public func thawProcess(pid: Int32) {
+    /// Размораживает процесс (`SIGCONT`). Идемпотентно по pidStore.
+    public func thawProcess(pid: Int32) async {
         let rc = kill(pid, SIGCONT)
         suspendedPids.remove(pid)
+        await pidStore?.remove(pid: pid)
         if rc != 0 {
             Self.log.warning("thaw pid=\(pid) returned errno=\(errno)")
         } else {
@@ -94,56 +102,18 @@ public actor VortexActor {
     }
 
     /// Размораживает все ранее остановленные процессы. Идемпотентно.
-    /// ВАЖНО: вызывать из обработчика SIGINT/SIGTERM в `FroggyDaemon`.
-    public func thawAll() {
+    /// Сначала шлёт SIGCONT (главное), затем чистит persistent state.
+    public func thawAll() async {
+        let count = suspendedPids.count
         for pid in suspendedPids {
             _ = kill(pid, SIGCONT)
         }
-        let count = suspendedPids.count
         suspendedPids.removeAll()
+        await pidStore?.clear()
         if count > 0 {
             Self.log.info("thawAll: resumed \(count) processes")
         }
     }
 
     public func suspendedCount() -> Int { suspendedPids.count }
-
-    // MARK: - Validation
-
-    private func validate(pid: Int32) throws {
-        guard pid > 100 else {
-            throw VortexError.forbiddenPid(pid: pid, reason: "system pid (<=100)")
-        }
-        guard pid != getpid() else {
-            throw VortexError.forbiddenPid(pid: pid, reason: "self")
-        }
-        // Свой ли это пользователь? proc_pidinfo требует приватных API,
-        // используем kill(pid, 0) — он вернёт EPERM, если EUID не наш.
-        if kill(pid, 0) != 0 {
-            if errno == EPERM {
-                throw VortexError.forbiddenPid(pid: pid, reason: "different EUID")
-            }
-            if errno == ESRCH {
-                throw VortexError.forbiddenPid(pid: pid, reason: "no such process")
-            }
-        }
-        if let name = Self.executableName(forPid: pid),
-           Self.forbiddenExecutables.contains(name)
-        {
-            throw VortexError.forbiddenPid(pid: pid, reason: "system executable: \(name)")
-        }
-    }
-
-    /// Возвращает имя исполняемого файла процесса через `proc_name` (BSD libproc).
-    /// nil, если процесс недоступен.
-    nonisolated private static func executableName(forPid pid: Int32) -> String? {
-        var buffer = [CChar](repeating: 0, count: 1024)
-        let size = proc_name(pid, &buffer, UInt32(buffer.count))
-        guard size > 0 else { return nil }
-        return String(cString: buffer)
-    }
 }
-
-// `proc_name` объявлен в <libproc.h> — импортируем через bridging.
-@_silgen_name("proc_name")
-private func proc_name(_ pid: Int32, _ buffer: UnsafeMutablePointer<CChar>, _ buffersize: UInt32) -> Int32

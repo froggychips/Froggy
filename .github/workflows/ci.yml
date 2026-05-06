@@ -4,33 +4,23 @@ on:
   push:
     branches: [main]
   pull_request:
+    branches: [main]
+  workflow_dispatch:
 
-concurrency:
-  group: ci-${{ github.ref }}
-  cancel-in-progress: true
+permissions:
+  contents: read
 
 jobs:
   build-test:
     name: Build & test
-    runs-on: macos-15
+    runs-on: macos-latest
+    timeout-minutes: 30
 
     steps:
       - uses: actions/checkout@v4
 
       - name: Show toolchain
-        run: |
-          xcodebuild -version
-          swift --version
-
-      - name: Cache SwiftPM build
-        uses: actions/cache@v4
-        with:
-          path: |
-            .build
-            ~/Library/Developer/Xcode/DerivedData
-          key: ${{ runner.os }}-spm-${{ hashFiles('Package.swift') }}
-          restore-keys: |
-            ${{ runner.os }}-spm-
+        run: swift --version
 
       - name: Resolve packages
         run: swift package resolve
@@ -39,4 +29,4 @@ jobs:
         run: swift build -c debug
 
       - name: Test
-        run: swift test --parallel
+        run: swift test

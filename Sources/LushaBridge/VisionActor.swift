@@ -1,12 +1,12 @@
 import CoreGraphics
 import Foundation
 import os
-import ScreenCaptureKit
 import Vision
 
 /// Снимки экрана + OCR. Все мутации состояния — через actor.
-/// Phase 2 добавил frame-diff (пропуск OCR при неизменном экране),
-/// redaction секретов перед записью и push в `ContextStore`.
+/// Phase 4: захват кадров делегирован persistent `ScreenStream` (Phase 2
+/// делал `SCScreenshotManager.captureImage` на каждом цикле — это тратило
+/// 100–200 мс на discovery).
 public actor VisionActor {
     private static let log = Logger(subsystem: "com.froggychips.froggy", category: "vision")
     private static let signposter = OSSignposter(subsystem: "com.froggychips.froggy", category: "vision")
@@ -19,17 +19,20 @@ public actor VisionActor {
     private let redactor: Redactor
     private let contextStore: ContextStore?
     private let frameSimilarityThreshold: Double
+    private let screenStream: ScreenStream
 
     public init(
         captureInterval: Duration = .seconds(2),
         redactor: Redactor = Redactor(),
         contextStore: ContextStore? = nil,
-        frameSimilarityThreshold: Double = 0.98
+        frameSimilarityThreshold: Double = 0.98,
+        screenStream: ScreenStream = ScreenStream()
     ) {
         self.captureInterval = captureInterval
         self.redactor = redactor
         self.contextStore = contextStore
         self.frameSimilarityThreshold = frameSimilarityThreshold
+        self.screenStream = screenStream
         let supportDir = FileManager.default
             .urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("Froggy", isDirectory: true)
@@ -43,14 +46,27 @@ public actor VisionActor {
 
     public func stateFileURL() -> URL { stateFilePath }
 
-    /// Запускает цикл захвата. Кооперативно реагирует на `Task.isCancelled`,
-    /// поэтому отмена внешней Task сразу прервёт цикл.
+    /// Запускает persistent stream + цикл OCR. Кооперативно прерывается
+    /// по `Task.isCancelled`.
     public func startCapture() async {
         guard !isCapturing else { return }
         isCapturing = true
         Self.log.info("capture loop started")
 
+        // Стартуем stream один раз. Frame rate берём из captureInterval —
+        // мы всё равно опрашиваем latestFrame() в этом темпе.
+        let intervalSec = max(0.1, captureInterval.toSeconds)
+        let frameRateHz = max(0.5, 1.0 / intervalSec)
+        do {
+            try await screenStream.start(frameRateHz: frameRateHz)
+        } catch {
+            Self.log.error("screen stream failed to start: \(error.localizedDescription)")
+            isCapturing = false
+            return
+        }
+
         defer {
+            Task { [screenStream] in await screenStream.stop() }
             isCapturing = false
             Self.log.info("capture loop stopped")
         }
@@ -71,49 +87,39 @@ public actor VisionActor {
 
     public func capturing() -> Bool { isCapturing }
 
-    // MARK: - Capture
+    /// Текстовое описание последней ошибки stream'a — для статус-IPC.
+    /// nil если всё хорошо.
+    public func lastCaptureError() async -> String? {
+        await screenStream.lastErrorMessage()
+    }
+
+    // MARK: - Capture cycle
 
     private func runCycle() async {
         let interval = Self.signposter.beginInterval("captureCycle")
         defer { Self.signposter.endInterval("captureCycle", interval) }
 
-        do {
-            guard let image = try await captureMainDisplay() else { return }
-
-            // Frame-diff: если экран почти не изменился — OCR пропускаем.
-            if let digest = FrameDigest(image: image) {
-                if let prev = lastDigest,
-                   digest.similarity(to: prev) >= frameSimilarityThreshold
-                {
-                    Self.signposter.emitEvent("frameSkipped", id: .exclusive)
-                    return
-                }
-                lastDigest = digest
-            }
-
-            let strings = await Self.recognizeText(image: image)
-            let redacted = redactor.redact(strings)
-            await writeState(strings: redacted)
-            await contextStore?.push(lines: redacted)
-        } catch {
-            Self.log.error("capture cycle failed: \(error.localizedDescription)")
+        guard let box = await screenStream.latestFrame() else {
+            // ещё не пришёл первый кадр (или TCC denied). Просто ждём.
+            return
         }
-    }
+        let image = box.image
 
-    /// ScreenCaptureKit-захват главного дисплея. Заменяет deprecated `CGDisplayCreateImage`.
-    private func captureMainDisplay() async throws -> CGImage? {
-        let content = try await SCShareableContent.excludingDesktopWindows(
-            false, onScreenWindowsOnly: true
-        )
-        guard let display = content.displays.first else { return nil }
-        let filter = SCContentFilter(display: display, excludingWindows: [])
-        let config = SCStreamConfiguration()
-        config.width = display.width
-        config.height = display.height
-        config.showsCursor = false
-        return try await SCScreenshotManager.captureImage(
-            contentFilter: filter, configuration: config
-        )
+        // Frame-diff: пропускаем OCR на не изменившихся экранах.
+        if let digest = FrameDigest(image: image) {
+            if let prev = lastDigest,
+               digest.similarity(to: prev) >= frameSimilarityThreshold
+            {
+                Self.signposter.emitEvent("frameSkipped", id: .exclusive)
+                return
+            }
+            lastDigest = digest
+        }
+
+        let strings = await Self.recognizeText(image: image)
+        let redacted = redactor.redact(strings)
+        await writeState(strings: redacted)
+        await contextStore?.push(lines: redacted)
     }
 
     // MARK: - OCR
@@ -164,5 +170,13 @@ public actor VisionActor {
         } catch {
             Self.log.error("state write failed: \(error.localizedDescription)")
         }
+    }
+}
+
+/// Helper: `Duration.toSeconds` — public нет, реконструируем из components.
+private extension Duration {
+    var toSeconds: Double {
+        let comp = components
+        return Double(comp.seconds) + Double(comp.attoseconds) / 1e18
     }
 }

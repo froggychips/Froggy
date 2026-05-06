@@ -41,6 +41,10 @@ public struct IPCResponse: Codable, Sendable {
     public var snapshots: Int?
     public var lines: [String]?
     public var accessors: [Accessor]?
+    public var lastCaptureError: String?
+    /// Маркер «это последний chunk в стриме». Для one-shot ответов — true.
+    /// Для streaming-промежуточных chunk'ов — false.
+    public var final: Bool?
 
     public init() {}
 
@@ -48,12 +52,14 @@ public struct IPCResponse: Codable, Sendable {
         var r = IPCResponse()
         r.ok = false
         r.error = message
+        r.final = true
         return r
     }
 
     public static func success() -> IPCResponse {
         var r = IPCResponse()
         r.ok = true
+        r.final = true
         return r
     }
 
@@ -70,4 +76,16 @@ public struct IPCResponse: Codable, Sendable {
 
 public protocol IPCRequestHandler: Sendable {
     func handle(_ request: IPCRequest) async -> IPCResponse
+
+    /// Опциональный streaming путь: если возвращается non-nil, сервер
+    /// будет писать каждый IPCResponse одной JSON-строкой и закроет
+    /// соединение после chunk'a с `final == true`.
+    /// Дефолтная реализация возвращает nil — handler one-shot.
+    func handleStream(_ request: IPCRequest) -> AsyncThrowingStream<IPCResponse, any Error>?
+}
+
+extension IPCRequestHandler {
+    public func handleStream(_ request: IPCRequest) -> AsyncThrowingStream<IPCResponse, any Error>? {
+        nil
+    }
 }
