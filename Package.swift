@@ -11,6 +11,7 @@ let package = Package(
     platforms: [.macOS(.v14)],
     products: [
         .executable(name: "FroggyDaemon", targets: ["FroggyDaemon"]),
+        .executable(name: "FroggyMenuBar", targets: ["FroggyMenuBar"]),
         .library(name: "VortexCore", targets: ["VortexCore"]),
         .library(name: "LushaBridge", targets: ["LushaBridge"]),
     ],
@@ -22,6 +23,11 @@ let package = Package(
         .executableTarget(
             name: "FroggyDaemon",
             dependencies: ["VortexCore", "LushaBridge"],
+            swiftSettings: strictConcurrency
+        ),
+        .executableTarget(
+            name: "FroggyMenuBar",
+            dependencies: ["VortexCore"],
             swiftSettings: strictConcurrency
         ),
         .target(
