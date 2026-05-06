@@ -42,4 +42,77 @@ final class ContextStoreTests: XCTestCase {
         let n = await s.count()
         XCTAssertEqual(n, 0)
     }
+
+    // MARK: - Phase 6: dedup
+
+    func testDedupSkipsDuplicateNeighbors() async {
+        let s = ContextStore(
+            capacity: 10,
+            scorer: JaccardSimilarityScorer(),
+            dedupThreshold: 0.85
+        )
+        await s.push(lines: ["alpha beta gamma"])
+        await s.push(lines: ["alpha beta gamma"]) // identical → skipped
+        await s.push(lines: ["alpha beta gamma"]) // identical → skipped
+        let n = await s.count()
+        XCTAssertEqual(n, 1)
+    }
+
+    func testDedupDoesNotSkipDifferentLines() async {
+        let s = ContextStore(
+            capacity: 10,
+            scorer: JaccardSimilarityScorer(),
+            dedupThreshold: 0.85
+        )
+        await s.push(lines: ["alpha beta gamma"])
+        await s.push(lines: ["delta epsilon zeta"])
+        let n = await s.count()
+        XCTAssertEqual(n, 2)
+    }
+
+    func testDedupDisabledByDefault() async {
+        let s = ContextStore(capacity: 10) // default scorer = Noop → never skips
+        await s.push(lines: ["x"])
+        await s.push(lines: ["x"])
+        await s.push(lines: ["x"])
+        let n = await s.count()
+        XCTAssertEqual(n, 3)
+    }
+
+    func testDedupZeroThresholdAcceptsEverything() async {
+        // threshold=0 + Jaccard: только полное несовпадение (0.0) пропустит;
+        // identical (1.0) — отброшено.
+        let s = ContextStore(
+            capacity: 10,
+            scorer: JaccardSimilarityScorer(),
+            dedupThreshold: 0.0
+        )
+        await s.push(lines: ["same"])
+        await s.push(lines: ["same"])
+        let n = await s.count()
+        XCTAssertEqual(n, 1)
+    }
+
+    // MARK: - Phase 6: multi-byte truncation
+
+    func testRecentContextTruncatesCyrillicByGraphemes() async {
+        let s = ContextStore(capacity: 5)
+        // Длинный кириллический snapshot — заведомо больше budget.
+        let long = String(repeating: "тест ", count: 200)
+        await s.push(lines: [long])
+        let out = await s.recentContext(maxChars: 50)
+        // Строго не больше budget'а в graphemes.
+        XCTAssertLessThanOrEqual(out.count, 50)
+        // И не пустое — старый код мог вернуть "".
+        XCTAssertGreaterThan(out.count, 0)
+    }
+
+    func testRecentContextHandlesEmojiInTruncation() async {
+        let s = ContextStore(capacity: 5)
+        let emojiLine = String(repeating: "🐸", count: 100)
+        await s.push(lines: [emojiLine])
+        let out = await s.recentContext(maxChars: 30)
+        XCTAssertLessThanOrEqual(out.count, 30)
+        XCTAssertGreaterThan(out.count, 0)
+    }
 }

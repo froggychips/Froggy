@@ -127,6 +127,10 @@ private final class FrameSink: NSObject, SCStreamOutput, SCStreamDelegate, @unch
         guard let cg = ciContext.createCGImage(ci, from: ci.extent) else { return }
         lock.lock()
         latest = cg
+        // Успешный кадр → сбросить остаток stale-error: например пользователь
+        // перезапустил демон после того как разрешил Screen Recording. Иначе
+        // TCC-banner в menubar остался бы гореть навсегда.
+        lastError = nil
         lock.unlock()
     }
 
