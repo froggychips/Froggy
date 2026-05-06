@@ -35,9 +35,19 @@ struct FroggyDaemon {
 
         let vortex = VortexActor(pidStore: pidStore)
         let mlx = MLXActor(memoryLimitBytes: config.gpuMemoryLimitBytes)
-        let coordinator = VortexCoordinator(
-            mlx: mlx, vortex: vortex, freezeBundleIds: config.freezeBundleIds
+        let pressureSource: any MemoryPressureSource = DispatchMemoryPressureSource()
+        let monitor = MemoryPressureMonitor(
+            source: pressureSource,
+            cooldownSeconds: TimeInterval(config.pressureCooldownSeconds)
         )
+        let coordinator = VortexCoordinator(
+            mlx: mlx,
+            vortex: vortex,
+            monitor: monitor,
+            tier1BundleIds: config.freezeTier1BundleIds,
+            tier2BundleIds: config.freezeTier2BundleIds
+        )
+        await coordinator.startMonitoring()
         let scorer: any SimilarityScorer = config.contextDedupEnabled
             ? JaccardSimilarityScorer()
             : NoopSimilarityScorer()
@@ -255,6 +265,17 @@ struct DaemonIPCHandler: IPCRequestHandler, Sendable {
         case "thawAll":
             await vortex.thawAll()
             return .success()
+
+        case "pressure":
+            let snap = await coordinator.pressureSnapshot()
+            var r = IPCResponse()
+            r.ok = true
+            r.pressureLevel = snap.level.rawValue
+            r.tier1Frozen = snap.tier1Frozen
+            r.tier2Frozen = snap.tier2Frozen
+            r.secondsInLevel = snap.secondsInLevel
+            r.final = true
+            return r
 
         default:
             return .failure("unknown cmd: \(request.cmd)")

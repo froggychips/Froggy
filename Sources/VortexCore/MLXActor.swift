@@ -25,6 +25,7 @@ public actor MLXActor {
 
     private var container: ModelContainer?
     private var loadedModelPath: String?
+    private var memoryLimitApplied = false
     private let memoryLimitBytes: Int
 
     /// - Parameter memoryLimitBytes: верхняя граница GPU-памяти в байтах.
@@ -32,13 +33,20 @@ public actor MLXActor {
     public init(memoryLimitBytes: Int? = nil) {
         let physical = Int(ProcessInfo.processInfo.physicalMemory)
         self.memoryLimitBytes = memoryLimitBytes ?? max(2 << 30, physical * 6 / 10)
-        MLX.Memory.memoryLimit = self.memoryLimitBytes
+        // Не трогаем `MLX.Memory.memoryLimit` в init — это тянет MLX
+        // runtime, и в parallel-xctest без metallib падает с "library not
+        // found". Применим лимит непосредственно перед `loadContainer`.
     }
 
     /// Загрузка модели из локальной директории (HuggingFace-репо в формате MLX).
     public func loadModel(modelPath: String) async throws {
         let interval = Self.signposter.beginInterval("loadModel")
         defer { Self.signposter.endInterval("loadModel", interval) }
+
+        if !memoryLimitApplied {
+            MLX.Memory.memoryLimit = memoryLimitBytes
+            memoryLimitApplied = true
+        }
 
         let url = URL(fileURLWithPath: modelPath, isDirectory: true)
         var isDir: ObjCBool = false

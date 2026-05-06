@@ -7,7 +7,21 @@ public struct FroggyConfig: Codable, Sendable, Equatable {
     public var modelPath: String?
     public var gpuMemoryLimitBytes: Int?
     public var captureIntervalSeconds: Int
-    public var freezeBundleIds: [String]
+
+    /// Tier-1: морозим при `.warning`. По умолчанию — лёгкие фоновые
+    /// приложения, которые редко бьют по UX (плеер, чат с pull-моделью,
+    /// IM, который не критичен в момент тяжёлой работы).
+    public var freezeTier1BundleIds: [String]
+
+    /// Tier-2: дополнительно морозим при `.critical`. По умолчанию —
+    /// корпоративные коммуникации/доки. Их «оживить» дороже, поэтому
+    /// трогаем только когда unified memory реально под прессом.
+    public var freezeTier2BundleIds: [String]
+
+    /// Сколько секунд уровень должен продержаться в стабильно более низком
+    /// состоянии, прежде чем мы начнём оттепель.
+    public var pressureCooldownSeconds: Int
+
     public var ipcSocketPath: String
     public var frameSimilarityThreshold: Double
     public var contextWindowSize: Int
@@ -15,36 +29,52 @@ public struct FroggyConfig: Codable, Sendable, Equatable {
     public var contextDedupEnabled: Bool
     public var contextDedupThreshold: Double
 
+    /// **DEPRECATED.** Алиас на `freezeTier1BundleIds` для обратной совместимости
+    /// со старыми `config.json`. Если в файле указано и старое, и новое поле —
+    /// побеждает новое. Удалить в одной из следующих фаз.
+    public var freezeBundleIds: [String]?
+
     public init(
         modelPath: String? = nil,
         gpuMemoryLimitBytes: Int? = nil,
         captureIntervalSeconds: Int = 2,
-        freezeBundleIds: [String] = FroggyConfig.defaultFreezeBundleIds,
+        freezeTier1BundleIds: [String] = FroggyConfig.defaultFreezeTier1BundleIds,
+        freezeTier2BundleIds: [String] = FroggyConfig.defaultFreezeTier2BundleIds,
+        pressureCooldownSeconds: Int = 60,
         ipcSocketPath: String = FroggyConfig.defaultSocketPath,
         frameSimilarityThreshold: Double = 0.98,
         contextWindowSize: Int = 30,
         contextMaxChars: Int = 4096,
         contextDedupEnabled: Bool = true,
-        contextDedupThreshold: Double = 0.85
+        contextDedupThreshold: Double = 0.85,
+        freezeBundleIds: [String]? = nil
     ) {
         self.modelPath = modelPath
         self.gpuMemoryLimitBytes = gpuMemoryLimitBytes
         self.captureIntervalSeconds = captureIntervalSeconds
-        self.freezeBundleIds = freezeBundleIds
+        self.freezeTier1BundleIds = freezeTier1BundleIds
+        self.freezeTier2BundleIds = freezeTier2BundleIds
+        self.pressureCooldownSeconds = pressureCooldownSeconds
         self.ipcSocketPath = ipcSocketPath
         self.frameSimilarityThreshold = frameSimilarityThreshold
         self.contextWindowSize = contextWindowSize
         self.contextMaxChars = contextMaxChars
         self.contextDedupEnabled = contextDedupEnabled
         self.contextDedupThreshold = contextDedupThreshold
+        self.freezeBundleIds = freezeBundleIds
     }
 
-    public static let defaultFreezeBundleIds: [String] = [
-        "com.tinyspeck.slackmacgap",      // Slack
-        "com.hnc.Discord",                // Discord
-        "com.spotify.client",             // Spotify
-        "com.microsoft.teams2",           // Teams
-        "com.electron.dropbox",           // Dropbox
+    public static let defaultFreezeTier1BundleIds: [String] = [
+        "com.spotify.client",
+        "com.hnc.Discord",
+        "ru.keepcoder.Telegram",
+        "com.electron.dropbox",
+    ]
+
+    public static let defaultFreezeTier2BundleIds: [String] = [
+        "com.tinyspeck.slackmacgap",   // Slack
+        "notion.id",                   // Notion
+        "com.microsoft.teams2",        // Teams
     ]
 
     /// `~/Library/Application Support/Froggy/`.
@@ -63,14 +93,24 @@ public struct FroggyConfig: Codable, Sendable, Equatable {
     }
 
     // Custom decoder so older config.json files without the new fields still
-    // load — they'll just get the current defaults.
+    // load — they'll just get the current defaults. Старое поле
+    // `freezeBundleIds` маппится на tier-1, если новое поле отсутствует.
     public init(from decoder: any Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         let d = FroggyConfig()
+
         self.modelPath = try c.decodeIfPresent(String.self, forKey: .modelPath)
         self.gpuMemoryLimitBytes = try c.decodeIfPresent(Int.self, forKey: .gpuMemoryLimitBytes)
         self.captureIntervalSeconds = try c.decodeIfPresent(Int.self, forKey: .captureIntervalSeconds) ?? d.captureIntervalSeconds
-        self.freezeBundleIds = try c.decodeIfPresent([String].self, forKey: .freezeBundleIds) ?? d.freezeBundleIds
+
+        let legacy = try c.decodeIfPresent([String].self, forKey: .freezeBundleIds)
+        let newTier1 = try c.decodeIfPresent([String].self, forKey: .freezeTier1BundleIds)
+        self.freezeTier1BundleIds = newTier1 ?? legacy ?? d.freezeTier1BundleIds
+        self.freezeBundleIds = legacy
+
+        self.freezeTier2BundleIds = try c.decodeIfPresent([String].self, forKey: .freezeTier2BundleIds) ?? d.freezeTier2BundleIds
+        self.pressureCooldownSeconds = try c.decodeIfPresent(Int.self, forKey: .pressureCooldownSeconds) ?? d.pressureCooldownSeconds
+
         self.ipcSocketPath = try c.decodeIfPresent(String.self, forKey: .ipcSocketPath) ?? d.ipcSocketPath
         self.frameSimilarityThreshold = try c.decodeIfPresent(Double.self, forKey: .frameSimilarityThreshold) ?? d.frameSimilarityThreshold
         self.contextWindowSize = try c.decodeIfPresent(Int.self, forKey: .contextWindowSize) ?? d.contextWindowSize
