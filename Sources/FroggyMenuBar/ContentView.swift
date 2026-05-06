@@ -17,10 +17,16 @@ struct ContentView: View {
                 .buttonStyle(.borderless)
             }
 
+            if model.needsScreenRecordingPermission {
+                tccBanner
+            }
+
             Divider()
             statusBlock
             Divider()
             modelBlock
+            Divider()
+            generationBlock
             Divider()
             contextBlock
 
@@ -41,6 +47,37 @@ struct ContentView: View {
         .padding(12)
     }
 
+    // MARK: - TCC banner
+
+    @ViewBuilder
+    private var tccBanner: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 6) {
+                Image(systemName: "exclamationmark.triangle.fill")
+                    .foregroundStyle(.yellow)
+                Text("Screen Recording permission needed")
+                    .font(.subheadline).bold()
+            }
+            Text(model.status?.lastCaptureError
+                 ?? "Capture is running but no frames have arrived. macOS likely blocked screen recording for FroggyDaemon.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            Button("Open Privacy Settings") {
+                model.openScreenRecordingSettings()
+            }
+            .controlSize(.small)
+        }
+        .padding(8)
+        .background(Color.yellow.opacity(0.15))
+        .overlay(
+            RoundedRectangle(cornerRadius: 4)
+                .stroke(Color.yellow.opacity(0.5), lineWidth: 1)
+        )
+    }
+
+    // MARK: - Status
+
     @ViewBuilder
     private var statusBlock: some View {
         VStack(alignment: .leading, spacing: 4) {
@@ -52,6 +89,8 @@ struct ContentView: View {
             row("Snapshots", model.status?.snapshots.map(String.init) ?? "—")
         }
     }
+
+    // MARK: - Model
 
     @ViewBuilder
     private var modelBlock: some View {
@@ -68,6 +107,51 @@ struct ContentView: View {
             }
         }
     }
+
+    // MARK: - Streaming generation
+
+    @ViewBuilder
+    private var generationBlock: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack {
+                Text("Generate").font(.subheadline).bold()
+                Spacer()
+                if model.isGenerating {
+                    ProgressView().controlSize(.small)
+                }
+            }
+            TextField("Prompt", text: $model.promptInput)
+                .textFieldStyle(.roundedBorder)
+                .font(.system(size: 11, design: .monospaced))
+                .disabled(model.isGenerating)
+            HStack {
+                Button("Generate") { model.startGeneration() }
+                    .disabled(
+                        model.isGenerating
+                        || model.promptInput.isEmpty
+                        || model.status?.modelLoaded != true
+                    )
+                Button("Cancel") { model.cancelGeneration() }
+                    .disabled(!model.isGenerating)
+            }
+            if !model.streamOutput.isEmpty {
+                ScrollView {
+                    Text(model.streamOutput)
+                        .font(.system(size: 11, design: .monospaced))
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .textSelection(.enabled)
+                }
+                .frame(maxHeight: 100)
+                .background(Color(nsColor: .textBackgroundColor))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 4)
+                        .stroke(Color(nsColor: .separatorColor), lineWidth: 1)
+                )
+            }
+        }
+    }
+
+    // MARK: - Context
 
     @ViewBuilder
     private var contextBlock: some View {
