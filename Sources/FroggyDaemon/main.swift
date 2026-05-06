@@ -10,7 +10,7 @@ private let log = Logger(subsystem: "com.froggychips.froggy", category: "daemon"
 @main
 struct FroggyDaemon {
     static func main() async {
-        log.info("🐸 Froggy Daemon v0.2.0 starting")
+        log.info("🐸 Froggy Daemon v0.3.0 starting")
 
         let cli: CLIArgs
         do {
@@ -38,6 +38,10 @@ struct FroggyDaemon {
             frameSimilarityThreshold: config.frameSimilarityThreshold
         )
 
+        let registry = AccessorRegistry()
+        await registry.register(OCRAccessor(store: contextStore))
+        await registry.register(FrontmostAppAccessor())
+
         installSignalHandlers(coordinator: coordinator)
 
         if let modelPath = config.modelPath {
@@ -56,6 +60,7 @@ struct FroggyDaemon {
             vortex: vortex,
             vision: vision,
             contextStore: contextStore,
+            registry: registry,
             defaultContextChars: config.contextMaxChars
         )
         let ipc = IPCServer(socketPath: config.ipcSocketPath, handler: handler)
@@ -120,6 +125,7 @@ struct DaemonIPCHandler: IPCRequestHandler, Sendable {
     let vortex: VortexActor
     let vision: VisionActor
     let contextStore: ContextStore
+    let registry: AccessorRegistry
     let defaultContextChars: Int
 
     func handle(_ request: IPCRequest) async -> IPCResponse {
@@ -129,6 +135,7 @@ struct DaemonIPCHandler: IPCRequestHandler, Sendable {
             r.ok = true
             r.capturing = await vision.capturing()
             r.modelLoaded = await coordinator.mlx.isLoaded()
+            r.modelPath = await coordinator.mlx.currentModelPath()
             r.memoryPressure = await vortex.getMemoryPressure()
             r.frozen = await vortex.suspendedCount()
             r.snapshots = await contextStore.count()
@@ -158,6 +165,45 @@ struct DaemonIPCHandler: IPCRequestHandler, Sendable {
             r.ok = true
             r.context = text
             r.snapshots = await contextStore.count()
+            return r
+
+        case "loadModel":
+            guard let path = request.path else {
+                return .failure("missing 'path'")
+            }
+            do {
+                try await coordinator.loadModel(modelPath: path)
+                var r = IPCResponse()
+                r.ok = true
+                r.modelPath = await coordinator.mlx.currentModelPath()
+                return r
+            } catch {
+                return .failure(String(describing: error))
+            }
+
+        case "unloadModel":
+            await coordinator.unloadModel()
+            return .success()
+
+        case "accessors":
+            let descriptors = await registry.list()
+            var r = IPCResponse()
+            r.ok = true
+            r.accessors = descriptors.map {
+                IPCResponse.Accessor(id: $0.id, name: $0.name)
+            }
+            return r
+
+        case "snapshot":
+            guard let id = request.accessor else {
+                return .failure("missing 'accessor'")
+            }
+            guard let lines = await registry.snapshot(id: id) else {
+                return .failure("no accessor with id '\(id)'")
+            }
+            var r = IPCResponse()
+            r.ok = true
+            r.lines = lines
             return r
 
         case "freeze":

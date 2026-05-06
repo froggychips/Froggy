@@ -12,18 +12,27 @@ swift build -c release --product FroggyDaemon
 
 The binary lands in `.build/arm64-apple-macosx/release/FroggyDaemon`.
 
-## 2. Codesign with hardened runtime
+## 2. Codesign with hardened runtime + entitlements
 
 ```sh
 codesign --force --options runtime --timestamp \
+    --entitlements packaging/Froggy.entitlements \
     --sign "Developer ID Application: Your Name (TEAMID)" \
     .build/arm64-apple-macosx/release/FroggyDaemon
 ```
 
-The hardened runtime is required for notarization. ScreenCaptureKit, Vision and
-Apple Events all need an entitlements plist if you sandbox; an unsandboxed
-LaunchAgent (the default for this template) just needs hardened runtime + user
-TCC consent on first run.
+The hardened runtime is required for notarization. The shipped
+`Froggy.entitlements` keeps the App Sandbox **off** because Vortex needs to
+`kill()` other processes the user owns — sandboxed processes cannot signal
+pids outside the sandbox, which would break the headline feature.
+
+ScreenCaptureKit, Vision and Apple Events still need user consent in
+**System Settings → Privacy & Security** on first run regardless of
+entitlements; sandbox vs. hardened-runtime control which APIs you're allowed
+to *try*, TCC controls whether the user lets you actually do it.
+
+For `FroggyMenuBar` repeat the same `codesign` invocation against
+`.build/arm64-apple-macosx/release/FroggyMenuBar`.
 
 ## 3. Notarize
 

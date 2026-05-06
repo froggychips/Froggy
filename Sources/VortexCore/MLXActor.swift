@@ -24,6 +24,7 @@ public actor MLXActor {
     private static let signposter = OSSignposter(subsystem: "com.froggychips.froggy", category: "mlx")
 
     private var container: ModelContainer?
+    private var loadedModelPath: String?
     private let memoryLimitBytes: Int
 
     /// - Parameter memoryLimitBytes: верхняя граница GPU-памяти в байтах.
@@ -51,6 +52,7 @@ public actor MLXActor {
                 from: url,
                 using: #huggingFaceTokenizerLoader()
             )
+            self.loadedModelPath = url.path
             Self.log.info("loaded model at \(url.path, privacy: .public)")
         } catch {
             throw MLXActorError.loadFailed(error.localizedDescription)
@@ -59,10 +61,13 @@ public actor MLXActor {
 
     public func unloadModel() {
         container = nil
+        loadedModelPath = nil
         MLX.Memory.clearCache()
     }
 
     public func isLoaded() -> Bool { container != nil }
+
+    public func currentModelPath() -> String? { loadedModelPath }
 
     /// Сгенерировать ответ. Бросает `MLXActorError.modelNotLoaded`, если `loadModel` не вызывался.
     public func generate(prompt: String, maxTokens: Int = 200) async throws -> String {
