@@ -8,6 +8,7 @@ public struct IPCRequest: Codable, Sendable {
     public var maxChars: Int?
     public var path: String?
     public var accessor: String?
+    public var useContext: Bool?
 
     public init(
         cmd: String,
@@ -16,7 +17,8 @@ public struct IPCRequest: Codable, Sendable {
         pid: Int32? = nil,
         maxChars: Int? = nil,
         path: String? = nil,
-        accessor: String? = nil
+        accessor: String? = nil,
+        useContext: Bool? = nil
     ) {
         self.cmd = cmd
         self.prompt = prompt
@@ -25,6 +27,7 @@ public struct IPCRequest: Codable, Sendable {
         self.maxChars = maxChars
         self.path = path
         self.accessor = accessor
+        self.useContext = useContext
     }
 }
 
