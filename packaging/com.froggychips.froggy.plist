@@ -1,0 +1,39 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.froggychips.froggy</string>
+
+    <!-- Replace with the absolute path to your built FroggyDaemon binary.
+         After codesigning + notarization the binary should live in
+         /usr/local/libexec/FroggyDaemon (or wherever your installer puts it). -->
+    <key>ProgramArguments</key>
+    <array>
+        <string>/usr/local/libexec/FroggyDaemon</string>
+    </array>
+
+    <!-- Daemon respects FROGGY_MODEL_PATH and FROGGY_CAPTURE_INTERVAL.
+         Per-user overrides should live in
+         ~/Library/Application Support/Froggy/config.json instead. -->
+    <key>EnvironmentVariables</key>
+    <dict/>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>KeepAlive</key>
+    <dict>
+        <key>SuccessfulExit</key>
+        <false/>
+    </dict>
+
+    <key>ProcessType</key>
+    <string>Interactive</string>
+
+    <key>StandardOutPath</key>
+    <string>/tmp/froggy-daemon.log</string>
+    <key>StandardErrorPath</key>
+    <string>/tmp/froggy-daemon.log</string>
+</dict>
+</plist>

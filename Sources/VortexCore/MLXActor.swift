@@ -21,6 +21,7 @@ public enum MLXActorError: Error, Sendable, CustomStringConvertible {
 /// MLX-инференс на Apple Silicon. Все мутации `container` — через actor.
 public actor MLXActor {
     private static let log = Logger(subsystem: "com.froggychips.froggy", category: "mlx")
+    private static let signposter = OSSignposter(subsystem: "com.froggychips.froggy", category: "mlx")
 
     private var container: ModelContainer?
     private let memoryLimitBytes: Int
@@ -35,6 +36,9 @@ public actor MLXActor {
 
     /// Загрузка модели из локальной директории (HuggingFace-репо в формате MLX).
     public func loadModel(modelPath: String) async throws {
+        let interval = Self.signposter.beginInterval("loadModel")
+        defer { Self.signposter.endInterval("loadModel", interval) }
+
         let url = URL(fileURLWithPath: modelPath, isDirectory: true)
         var isDir: ObjCBool = false
         guard FileManager.default.fileExists(atPath: url.path, isDirectory: &isDir),
@@ -63,6 +67,8 @@ public actor MLXActor {
     /// Сгенерировать ответ. Бросает `MLXActorError.modelNotLoaded`, если `loadModel` не вызывался.
     public func generate(prompt: String, maxTokens: Int = 200) async throws -> String {
         guard let container else { throw MLXActorError.modelNotLoaded }
+        let interval = Self.signposter.beginInterval("generate")
+        defer { Self.signposter.endInterval("generate", interval) }
 
         let lmInput = try await container.prepare(
             input: UserInput(prompt: .text(prompt))

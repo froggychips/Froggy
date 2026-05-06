@@ -6,6 +6,7 @@ import os
 /// замораживает фоновые приложения из allowlist, после выгрузки — отпускает.
 public actor VortexCoordinator {
     private static let log = Logger(subsystem: "com.froggychips.froggy", category: "coordinator")
+    private static let signposter = OSSignposter(subsystem: "com.froggychips.froggy", category: "coordinator")
 
     public let mlx: MLXActor
     public let vortex: VortexActor
@@ -25,6 +26,9 @@ public actor VortexCoordinator {
     /// Если загрузка падает — pids всё равно отпускаем, чтобы не оставить
     /// пользователя с зависшим Slack.
     public func loadModel(modelPath: String) async throws {
+        let interval = Self.signposter.beginInterval("coordinator.loadModel")
+        defer { Self.signposter.endInterval("coordinator.loadModel", interval) }
+
         let pids = await Self.pids(forBundleIds: freezeBundleIds)
         Self.log.info("freezing \(pids.count) processes before model load")
 
