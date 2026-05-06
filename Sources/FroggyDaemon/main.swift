@@ -76,6 +76,7 @@ struct FroggyDaemon {
             vision: vision,
             contextStore: contextStore,
             registry: registry,
+            augmenter: PromptAugmenter(maxContextChars: config.contextMaxChars),
             defaultContextChars: config.contextMaxChars
         )
         let ipc = IPCServer(socketPath: config.ipcSocketPath, handler: handler)
@@ -144,7 +145,15 @@ struct DaemonIPCHandler: IPCRequestHandler, Sendable {
     let vision: VisionActor
     let contextStore: ContextStore
     let registry: AccessorRegistry
+    let augmenter: PromptAugmenter
     let defaultContextChars: Int
+
+    /// Если useContext == true, оборачиваем prompt в шаблон с свежим контекстом.
+    private func augmentedPrompt(_ prompt: String, useContext: Bool?) async -> String {
+        guard useContext == true else { return prompt }
+        let context = await contextStore.recentContext(maxChars: defaultContextChars)
+        return augmenter.augment(prompt: prompt, context: context)
+    }
 
     func handle(_ request: IPCRequest) async -> IPCResponse {
         switch request.cmd {
@@ -167,9 +176,10 @@ struct DaemonIPCHandler: IPCRequestHandler, Sendable {
             guard let prompt = request.prompt else {
                 return .failure("missing 'prompt'")
             }
+            let finalPrompt = await augmentedPrompt(prompt, useContext: request.useContext)
             do {
                 let text = try await coordinator.generate(
-                    prompt: prompt,
+                    prompt: finalPrompt,
                     maxTokens: request.maxTokens ?? 200
                 )
                 var r = IPCResponse()
@@ -259,13 +269,16 @@ struct DaemonIPCHandler: IPCRequestHandler, Sendable {
         // не дублировать логику ошибок.
         guard request.prompt != nil else { return nil }
 
-        let prompt = request.prompt!
+        let userPrompt = request.prompt!
         let maxTokens = request.maxTokens ?? 200
         let coordinator = self.coordinator
+        let useContext = request.useContext
+        let handlerSelf = self
 
         return AsyncThrowingStream { continuation in
             let task = Task {
                 do {
+                    let prompt = await handlerSelf.augmentedPrompt(userPrompt, useContext: useContext)
                     let mlxStream = await coordinator.mlx.generateStream(
                         prompt: prompt, maxTokens: maxTokens
                     )

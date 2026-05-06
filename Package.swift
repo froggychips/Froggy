@@ -12,6 +12,7 @@ let package = Package(
     products: [
         .executable(name: "FroggyDaemon", targets: ["FroggyDaemon"]),
         .executable(name: "FroggyMenuBar", targets: ["FroggyMenuBar"]),
+        .executable(name: "froggy", targets: ["FroggyCLI"]),
         .library(name: "VortexCore", targets: ["VortexCore"]),
         .library(name: "LushaBridge", targets: ["LushaBridge"]),
     ],
@@ -27,6 +28,11 @@ let package = Package(
         ),
         .executableTarget(
             name: "FroggyMenuBar",
+            dependencies: ["VortexCore"],
+            swiftSettings: strictConcurrency
+        ),
+        .executableTarget(
+            name: "FroggyCLI",
             dependencies: ["VortexCore"],
             swiftSettings: strictConcurrency
         ),

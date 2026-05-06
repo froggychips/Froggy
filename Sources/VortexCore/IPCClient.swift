@@ -95,9 +95,15 @@ public actor IPCClient {
         try await send(IPCRequest(cmd: "status"))
     }
 
-    public func generate(prompt: String, maxTokens: Int? = nil) async throws -> IPCResponse {
+    public func generate(
+        prompt: String,
+        maxTokens: Int? = nil,
+        useContext: Bool? = nil
+    ) async throws -> IPCResponse {
         try await send(
-            IPCRequest(cmd: "generate", prompt: prompt, maxTokens: maxTokens),
+            IPCRequest(
+                cmd: "generate", prompt: prompt, maxTokens: maxTokens, useContext: useContext
+            ),
             timeout: .seconds(300)
         )
     }
@@ -105,9 +111,12 @@ public actor IPCClient {
     /// Streaming-генерация: stream строк-токенов.
     public nonisolated func generateStream(
         prompt: String,
-        maxTokens: Int? = nil
+        maxTokens: Int? = nil,
+        useContext: Bool? = nil
     ) -> AsyncThrowingStream<String, any Error> {
-        let req = IPCRequest(cmd: "generate", prompt: prompt, maxTokens: maxTokens)
+        let req = IPCRequest(
+            cmd: "generate", prompt: prompt, maxTokens: maxTokens, useContext: useContext
+        )
         let upstream = sendStream(req)
         return AsyncThrowingStream { continuation in
             let task = Task {
