@@ -34,6 +34,19 @@ to *try*, TCC controls whether the user lets you actually do it.
 For `FroggyMenuBar` repeat the same `codesign` invocation against
 `.build/arm64-apple-macosx/release/FroggyMenuBar`.
 
+### Pageout strategy `machVM` и `task_for_pid-allow`
+
+ADR 0007 описывает три стратегии pageout. Стратегия `machVM` использует
+`task_for_pid` + `mach_vm_behavior_set(VM_BEHAVIOR_PAGEOUT)` и требует
+**Apple Developer ID** подпись + provisioning profile с правом
+`com.apple.developer.task-for-pid-allow`. На простой dev-подписи это право
+не активируется — `task_for_pid` вернёт `KERN_FAILURE`, и `PageoutChain`
+автоматически откатится на `jetsam` (а затем `scratch`). Поведение
+безопасное по умолчанию: на dev-машине без Developer ID `pageoutStrategy=jetsam`
+работает сразу. Чтобы активировать `machVM`, нужно также прописать в
+provisioning profile `com.apple.developer.task-for-pid-allow=true` и
+выставить `"pageoutStrategy": "machVM"` в `config.json`.
+
 ## 3. Notarize
 
 ```sh

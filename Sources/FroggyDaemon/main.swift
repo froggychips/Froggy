@@ -33,7 +33,13 @@ struct FroggyDaemon {
             log.notice("recovered \(recovered) frozen pids from previous run")
         }
 
-        let vortex = VortexActor(pidStore: pidStore)
+        let pageoutChain = PageoutChain(
+            preferred: config.pageoutStrategy,
+            machVM: MachVMPageoutImpl(),
+            jetsam: JetsamPageoutImpl(),
+            scratch: ScratchPageoutImpl(scratchMB: config.pageoutScratchMB)
+        )
+        let vortex = VortexActor(pidStore: pidStore, pageout: pageoutChain)
         let mlx = MLXActor(memoryLimitBytes: config.gpuMemoryLimitBytes)
         let pressureSource: any MemoryPressureSource = DispatchMemoryPressureSource()
         let monitor = MemoryPressureMonitor(
