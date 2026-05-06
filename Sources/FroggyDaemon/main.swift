@@ -38,7 +38,14 @@ struct FroggyDaemon {
         let coordinator = VortexCoordinator(
             mlx: mlx, vortex: vortex, freezeBundleIds: config.freezeBundleIds
         )
-        let contextStore = ContextStore(capacity: config.contextWindowSize)
+        let scorer: any SimilarityScorer = config.contextDedupEnabled
+            ? JaccardSimilarityScorer()
+            : NoopSimilarityScorer()
+        let contextStore = ContextStore(
+            capacity: config.contextWindowSize,
+            scorer: scorer,
+            dedupThreshold: config.contextDedupThreshold
+        )
         let vision = VisionActor(
             captureInterval: .seconds(config.captureIntervalSeconds),
             redactor: Redactor(),
