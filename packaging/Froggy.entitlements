@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!-- Vortex needs to send SIGSTOP/SIGCONT to other processes the user
+         owns. The App Sandbox blocks `kill()` against pids outside the
+         sandbox, so we explicitly disable it. The hardened runtime is
+         still on (see codesign --options runtime). -->
+    <key>com.apple.security.app-sandbox</key>
+    <false/>
+
+    <!-- ScreenCaptureKit + the OCR pipeline read framebuffers from other
+         apps. Even with the sandbox off, the user must approve Screen
+         Recording in System Settings → Privacy & Security on first run. -->
+    <key>com.apple.security.device.camera</key>
+    <false/>
+
+    <!-- The IPCClient inside FroggyMenuBar talks to FroggyDaemon over a
+         Unix socket. No outbound network, but if a future plugin needs it
+         (e.g. fetching a model from HF), flip this to true. -->
+    <key>com.apple.security.network.client</key>
+    <false/>
+
+    <!-- Read-only access to ~/Library/Application Support/Froggy. The
+         daemon uses standard FileManager so this is implicit, but listed
+         for clarity if you ever turn the sandbox back on. -->
+    <key>com.apple.security.files.user-selected.read-write</key>
+    <false/>
+</dict>
+</plist>
