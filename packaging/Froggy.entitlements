@@ -26,5 +26,19 @@
          for clarity if you ever turn the sandbox back on. -->
     <key>com.apple.security.files.user-selected.read-write</key>
     <false/>
+
+    <!-- Pageout стратегия `machVM` (см. ADR 0007) использует `task_for_pid` +
+         `mach_vm_behavior_set(VM_BEHAVIOR_PAGEOUT)` для прямого
+         выталкивания страниц замороженных процессов в compressor. Без
+         этого entitlement'а `task_for_pid` возвращает KERN_FAILURE и
+         PageoutChain автоматически откатывается на `jetsam`/`scratch`.
+
+         ВАЖНО: для активации `task_for_pid-allow` нужна Apple Developer ID
+         подпись + provisioning profile с правом — простая dev-подпись
+         его НЕ активирует. Если у вас нет Developer ID, оставьте
+         pageoutStrategy=jetsam (default), и pageout будет работать без
+         этого entitlement'а. -->
+    <key>com.apple.security.cs.debugger</key>
+    <true/>
 </dict>
 </plist>

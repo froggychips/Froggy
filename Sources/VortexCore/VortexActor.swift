@@ -27,12 +27,15 @@ public actor VortexActor {
 
     private let classifier: ProcessClassifier
     private let pidStore: FrozenPidsStore?
+    private let pageout: PageoutChain?
     private var suspendedPids: Set<Int32> = []
 
     public init(classifier: ProcessClassifier = ProcessClassifier(),
-                pidStore: FrozenPidsStore? = nil) {
+                pidStore: FrozenPidsStore? = nil,
+                pageout: PageoutChain? = nil) {
         self.classifier = classifier
         self.pidStore = pidStore
+        self.pageout = pageout
     }
 
     // MARK: - Memory pressure
@@ -86,6 +89,20 @@ public actor VortexActor {
         suspendedPids.insert(pid)
         await pidStore?.add(.init(pid: pid, executablePath: executablePath))
         Self.log.info("suspended pid=\(pid)")
+
+        // Принудительный pageout: SIGSTOP сам по себе оставляет dirty pages
+        // резидентными. Если pageout не сработал — лог-варн, не fail freeze.
+        if let pageout {
+            let outcome = await pageout.pageout(pid: pid)
+            switch outcome {
+            case .success(let used):
+                Self.log.info("pageout pid=\(pid) ok via \(used.rawValue, privacy: .public)")
+            case .skipped(let reason):
+                Self.log.info("pageout pid=\(pid) skipped: \(reason, privacy: .public)")
+            case .failed(let reason):
+                Self.log.warning("pageout pid=\(pid) failed: \(reason, privacy: .public)")
+            }
+        }
         return pid
     }
 
