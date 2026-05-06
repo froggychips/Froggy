@@ -22,6 +22,12 @@ public struct FroggyConfig: Codable, Sendable, Equatable {
     /// состоянии, прежде чем мы начнём оттепель.
     public var pressureCooldownSeconds: Int
 
+    /// Стратегия принудительного pageout после SIGSTOP. По умолчанию `jetsam`
+    /// (не требует `task_for_pid-allow` entitlement'а). См. ADR 0007.
+    public var pageoutStrategy: PageoutStrategy
+    /// Размер scratch-буфера для `.scratch` стратегии и для fallback-цепочки.
+    public var pageoutScratchMB: Int
+
     public var ipcSocketPath: String
     public var frameSimilarityThreshold: Double
     public var contextWindowSize: Int
@@ -41,6 +47,8 @@ public struct FroggyConfig: Codable, Sendable, Equatable {
         freezeTier1BundleIds: [String] = FroggyConfig.defaultFreezeTier1BundleIds,
         freezeTier2BundleIds: [String] = FroggyConfig.defaultFreezeTier2BundleIds,
         pressureCooldownSeconds: Int = 60,
+        pageoutStrategy: PageoutStrategy = .jetsam,
+        pageoutScratchMB: Int = 256,
         ipcSocketPath: String = FroggyConfig.defaultSocketPath,
         frameSimilarityThreshold: Double = 0.98,
         contextWindowSize: Int = 30,
@@ -55,6 +63,8 @@ public struct FroggyConfig: Codable, Sendable, Equatable {
         self.freezeTier1BundleIds = freezeTier1BundleIds
         self.freezeTier2BundleIds = freezeTier2BundleIds
         self.pressureCooldownSeconds = pressureCooldownSeconds
+        self.pageoutStrategy = pageoutStrategy
+        self.pageoutScratchMB = pageoutScratchMB
         self.ipcSocketPath = ipcSocketPath
         self.frameSimilarityThreshold = frameSimilarityThreshold
         self.contextWindowSize = contextWindowSize
@@ -110,6 +120,8 @@ public struct FroggyConfig: Codable, Sendable, Equatable {
 
         self.freezeTier2BundleIds = try c.decodeIfPresent([String].self, forKey: .freezeTier2BundleIds) ?? d.freezeTier2BundleIds
         self.pressureCooldownSeconds = try c.decodeIfPresent(Int.self, forKey: .pressureCooldownSeconds) ?? d.pressureCooldownSeconds
+        self.pageoutStrategy = try c.decodeIfPresent(PageoutStrategy.self, forKey: .pageoutStrategy) ?? d.pageoutStrategy
+        self.pageoutScratchMB = try c.decodeIfPresent(Int.self, forKey: .pageoutScratchMB) ?? d.pageoutScratchMB
 
         self.ipcSocketPath = try c.decodeIfPresent(String.self, forKey: .ipcSocketPath) ?? d.ipcSocketPath
         self.frameSimilarityThreshold = try c.decodeIfPresent(Double.self, forKey: .frameSimilarityThreshold) ?? d.frameSimilarityThreshold
