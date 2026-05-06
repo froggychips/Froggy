@@ -1,1 +1,8 @@
-node_modules/\n.DS_Store\n.build/\n*.log
+.DS_Store
+.build/
+.swiftpm/
+DerivedData/
+Package.resolved
+*.log
+*.xcodeproj/xcuserdata/
+node_modules/
