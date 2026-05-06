@@ -5,12 +5,20 @@ public struct IPCRequest: Codable, Sendable {
     public var prompt: String?
     public var maxTokens: Int?
     public var pid: Int32?
+    public var maxChars: Int?
 
-    public init(cmd: String, prompt: String? = nil, maxTokens: Int? = nil, pid: Int32? = nil) {
+    public init(
+        cmd: String,
+        prompt: String? = nil,
+        maxTokens: Int? = nil,
+        pid: Int32? = nil,
+        maxChars: Int? = nil
+    ) {
         self.cmd = cmd
         self.prompt = prompt
         self.maxTokens = maxTokens
         self.pid = pid
+        self.maxChars = maxChars
     }
 }
 
@@ -22,6 +30,8 @@ public struct IPCResponse: Codable, Sendable {
     public var modelLoaded: Bool?
     public var memoryPressure: Int?
     public var frozen: Int?
+    public var context: String?
+    public var snapshots: Int?
 
     public init() {}
 

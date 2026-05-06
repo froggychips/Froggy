@@ -10,7 +10,7 @@ private let log = Logger(subsystem: "com.froggychips.froggy", category: "daemon"
 @main
 struct FroggyDaemon {
     static func main() async {
-        log.info("🐸 Froggy Daemon v0.1.0 starting")
+        log.info("🐸 Froggy Daemon v0.2.0 starting")
 
         let cli: CLIArgs
         do {
@@ -30,7 +30,13 @@ struct FroggyDaemon {
         let coordinator = VortexCoordinator(
             mlx: mlx, vortex: vortex, freezeBundleIds: config.freezeBundleIds
         )
-        let vision = VisionActor(captureInterval: .seconds(config.captureIntervalSeconds))
+        let contextStore = ContextStore(capacity: config.contextWindowSize)
+        let vision = VisionActor(
+            captureInterval: .seconds(config.captureIntervalSeconds),
+            redactor: Redactor(),
+            contextStore: contextStore,
+            frameSimilarityThreshold: config.frameSimilarityThreshold
+        )
 
         installSignalHandlers(coordinator: coordinator)
 
@@ -46,7 +52,11 @@ struct FroggyDaemon {
         }
 
         let handler = DaemonIPCHandler(
-            coordinator: coordinator, vortex: vortex, vision: vision
+            coordinator: coordinator,
+            vortex: vortex,
+            vision: vision,
+            contextStore: contextStore,
+            defaultContextChars: config.contextMaxChars
         )
         let ipc = IPCServer(socketPath: config.ipcSocketPath, handler: handler)
         do {
@@ -109,6 +119,8 @@ struct DaemonIPCHandler: IPCRequestHandler, Sendable {
     let coordinator: VortexCoordinator
     let vortex: VortexActor
     let vision: VisionActor
+    let contextStore: ContextStore
+    let defaultContextChars: Int
 
     func handle(_ request: IPCRequest) async -> IPCResponse {
         switch request.cmd {
@@ -119,6 +131,7 @@ struct DaemonIPCHandler: IPCRequestHandler, Sendable {
             r.modelLoaded = await coordinator.mlx.isLoaded()
             r.memoryPressure = await vortex.getMemoryPressure()
             r.frozen = await vortex.suspendedCount()
+            r.snapshots = await contextStore.count()
             return r
 
         case "generate":
@@ -137,6 +150,15 @@ struct DaemonIPCHandler: IPCRequestHandler, Sendable {
             } catch {
                 return .failure(String(describing: error))
             }
+
+        case "context":
+            let maxChars = request.maxChars ?? defaultContextChars
+            let text = await contextStore.recentContext(maxChars: maxChars)
+            var r = IPCResponse()
+            r.ok = true
+            r.context = text
+            r.snapshots = await contextStore.count()
+            return r
 
         case "freeze":
             guard let pid = request.pid else { return .failure("missing 'pid'") }
