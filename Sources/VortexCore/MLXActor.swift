@@ -58,6 +58,8 @@ public actor MLXActor {
         MLX.Memory.clearCache()
     }
 
+    public func isLoaded() -> Bool { container != nil }
+
     /// Сгенерировать ответ. Бросает `MLXActorError.modelNotLoaded`, если `loadModel` не вызывался.
     public func generate(prompt: String, maxTokens: Int = 200) async throws -> String {
         guard let container else { throw MLXActorError.modelNotLoaded }

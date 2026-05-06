@@ -39,5 +39,15 @@ let package = Package(
             dependencies: [],
             swiftSettings: strictConcurrency
         ),
+        .testTarget(
+            name: "VortexCoreTests",
+            dependencies: ["VortexCore"],
+            swiftSettings: strictConcurrency
+        ),
+        .testTarget(
+            name: "LushaBridgeTests",
+            dependencies: ["LushaBridge"],
+            swiftSettings: strictConcurrency
+        ),
     ]
 )

@@ -54,6 +54,8 @@ public actor VisionActor {
         isCapturing = false
     }
 
+    public func capturing() -> Bool { isCapturing }
+
     // MARK: - Capture
 
     private func runCycle() async {

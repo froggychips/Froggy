@@ -12,39 +12,52 @@ struct FroggyDaemon {
     static func main() async {
         log.info("🐸 Froggy Daemon v0.1.0 starting")
 
-        let cfg: Config
+        let cli: CLIArgs
         do {
-            cfg = try Config.parse(arguments: CommandLine.arguments)
+            cli = try CLIArgs.parse(arguments: CommandLine.arguments)
         } catch {
-            FileHandle.standardError.write(Data("\(error)\n\n\(Config.usage)\n".utf8))
+            FileHandle.standardError.write(Data("\(error)\n\n\(CLIArgs.usage)\n".utf8))
             exit(2)
         }
 
-        let vision = VisionActor(captureInterval: .seconds(cfg.captureIntervalSeconds))
+        // Persisted config + CLI/env overrides.
+        var config = (try? FroggyConfig.load()) ?? FroggyConfig()
+        if let v = cli.modelPath { config.modelPath = v }
+        if let v = cli.captureIntervalSeconds { config.captureIntervalSeconds = v }
+
         let vortex = VortexActor()
-        let mlx = MLXActor()
+        let mlx = MLXActor(memoryLimitBytes: config.gpuMemoryLimitBytes)
+        let coordinator = VortexCoordinator(
+            mlx: mlx, vortex: vortex, freezeBundleIds: config.freezeBundleIds
+        )
+        let vision = VisionActor(captureInterval: .seconds(config.captureIntervalSeconds))
 
-        // Корректный shutdown: SIGSTOP-нутые процессы должны быть отпущены.
-        installSignalHandlers(vortex: vortex)
+        installSignalHandlers(coordinator: coordinator)
 
-        if let modelPath = cfg.modelPath {
+        if let modelPath = config.modelPath {
             do {
-                try await mlx.loadModel(modelPath: modelPath)
+                try await coordinator.loadModel(modelPath: modelPath)
                 log.info("model loaded: \(modelPath, privacy: .public)")
             } catch {
                 log.error("model load failed: \(error.localizedDescription, privacy: .public)")
             }
         } else {
-            log.notice("no --model-path / FROGGY_MODEL_PATH provided; running without LLM")
+            log.notice("no model path configured; daemon runs without LLM")
         }
 
-        let captureTask = Task {
-            await vision.startCapture()
+        let handler = DaemonIPCHandler(
+            coordinator: coordinator, vortex: vortex, vision: vision
+        )
+        let ipc = IPCServer(socketPath: config.ipcSocketPath, handler: handler)
+        do {
+            try await ipc.start()
+        } catch {
+            log.error("IPC start failed: \(error.localizedDescription, privacy: .public)")
         }
 
-        log.info("🚀 systems online")
+        let captureTask = Task { await vision.startCapture() }
+        log.info("🚀 systems online; ipc=\(config.ipcSocketPath, privacy: .public)")
 
-        // Главный мониторинг-цикл. Кооперативно прерывается по cancel у task.
         while !Task.isCancelled {
             do {
                 try await Task.sleep(for: .seconds(60))
@@ -56,25 +69,23 @@ struct FroggyDaemon {
         }
 
         captureTask.cancel()
-        await vortex.thawAll()
+        await coordinator.emergencyThaw()
+        await ipc.stop()
     }
 
-    /// Перехватывает SIGINT/SIGTERM и гарантированно размораживает процессы.
-    /// БЕЗ этого SIGSTOP-нутые процессы остались бы зависшими навсегда.
-    private static func installSignalHandlers(vortex: VortexActor) {
+    /// Перехватывает SIGINT/SIGTERM и через координатор размораживает процессы.
+    private static func installSignalHandlers(coordinator: VortexCoordinator) {
         for sig in [SIGINT, SIGTERM] {
-            // SIG_IGN, чтобы дефолтный обработчик не убил нас раньше DispatchSource.
             signal(sig, SIG_IGN)
             let src = DispatchSource.makeSignalSource(signal: sig, queue: .main)
             src.setEventHandler {
                 log.notice("signal \(sig) received — shutting down")
                 Task {
-                    await vortex.thawAll()
+                    await coordinator.emergencyThaw()
                     exit(0)
                 }
             }
             src.resume()
-            // Удерживаем источник до конца жизни процесса.
             SignalKeeper.shared.retain(src)
         }
     }
@@ -92,14 +103,71 @@ private final class SignalKeeper: @unchecked Sendable {
     }
 }
 
-// MARK: - CLI / Config
+// MARK: - IPC handler
 
-struct Config: Sendable {
+struct DaemonIPCHandler: IPCRequestHandler, Sendable {
+    let coordinator: VortexCoordinator
+    let vortex: VortexActor
+    let vision: VisionActor
+
+    func handle(_ request: IPCRequest) async -> IPCResponse {
+        switch request.cmd {
+        case "status":
+            var r = IPCResponse()
+            r.ok = true
+            r.capturing = await vision.capturing()
+            r.modelLoaded = await coordinator.mlx.isLoaded()
+            r.memoryPressure = await vortex.getMemoryPressure()
+            r.frozen = await vortex.suspendedCount()
+            return r
+
+        case "generate":
+            guard let prompt = request.prompt else {
+                return .failure("missing 'prompt'")
+            }
+            do {
+                let text = try await coordinator.generate(
+                    prompt: prompt,
+                    maxTokens: request.maxTokens ?? 200
+                )
+                var r = IPCResponse()
+                r.ok = true
+                r.text = text
+                return r
+            } catch {
+                return .failure(String(describing: error))
+            }
+
+        case "freeze":
+            guard let pid = request.pid else { return .failure("missing 'pid'") }
+            do {
+                try await vortex.freezeProcess(pid: pid)
+                return .success()
+            } catch {
+                return .failure(String(describing: error))
+            }
+
+        case "thawAll":
+            await vortex.thawAll()
+            return .success()
+
+        default:
+            return .failure("unknown cmd: \(request.cmd)")
+        }
+    }
+}
+
+// MARK: - CLI
+
+struct CLIArgs: Sendable {
     var modelPath: String?
-    var captureIntervalSeconds: Int = 2
+    var captureIntervalSeconds: Int?
 
     static let usage = """
     Usage: FroggyDaemon [--model-path <path>] [--capture-interval <seconds>]
+
+    Configuration is loaded from ~/Library/Application Support/Froggy/config.json
+    if present. CLI flags and env vars override fields in that file.
 
     Environment:
       FROGGY_MODEL_PATH        absolute path to local MLX model directory
@@ -120,12 +188,12 @@ struct Config: Sendable {
         }
     }
 
-    static func parse(arguments: [String]) throws -> Config {
-        var cfg = Config()
+    static func parse(arguments: [String]) throws -> CLIArgs {
+        var cli = CLIArgs()
         let env = ProcessInfo.processInfo.environment
-        cfg.modelPath = env["FROGGY_MODEL_PATH"]
+        cli.modelPath = env["FROGGY_MODEL_PATH"]
         if let raw = env["FROGGY_CAPTURE_INTERVAL"], let v = Int(raw) {
-            cfg.captureIntervalSeconds = v
+            cli.captureIntervalSeconds = v
         }
 
         var i = 1
@@ -134,14 +202,14 @@ struct Config: Sendable {
             switch arg {
             case "--model-path":
                 guard i + 1 < arguments.count else { throw ParseError.missingValue(arg) }
-                cfg.modelPath = arguments[i + 1]
+                cli.modelPath = arguments[i + 1]
                 i += 2
             case "--capture-interval":
                 guard i + 1 < arguments.count else { throw ParseError.missingValue(arg) }
                 guard let v = Int(arguments[i + 1]) else {
                     throw ParseError.invalidInt(arguments[i + 1])
                 }
-                cfg.captureIntervalSeconds = v
+                cli.captureIntervalSeconds = v
                 i += 2
             case "--help", "-h":
                 print(Self.usage)
@@ -150,6 +218,6 @@ struct Config: Sendable {
                 throw ParseError.unknownFlag(arg)
             }
         }
-        return cfg
+        return cli
     }
 }
