@@ -28,6 +28,12 @@ public actor VisionActor {
     private let contextStore: ContextStore?
     private let frameSimilarityThreshold: Double
     private let screenStream: ScreenStream
+    /// Внутренний gate: «не запускать OCR чаще, чем раз в `captureInterval`»
+    /// (FCP-1, ADR 0011). Frame, пришедший раньше окна, дропается без
+    /// буферизации. Существует параллельно с polling-sleep'ом ниже —
+    /// внешний sleep остаётся как cooperative-yield, internal pacer — как
+    /// authoritative-gate.
+    private var pacer: FramePacer
 
     public init(
         captureInterval: Duration = .seconds(2),
@@ -41,6 +47,7 @@ public actor VisionActor {
         self.contextStore = contextStore
         self.frameSimilarityThreshold = frameSimilarityThreshold
         self.screenStream = screenStream
+        self.pacer = FramePacer(interval: captureInterval)
         let supportDir = FileManager.default
             .urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("Froggy", isDirectory: true)
@@ -50,6 +57,21 @@ public actor VisionActor {
             attributes: [.posixPermissions: 0o700]
         )
         self.stateFilePath = supportDir.appendingPathComponent("state.json")
+    }
+
+    /// Тестовый seam: заменить time-source pacer'а на fake-clock. Public
+    /// API (init выше) трогать не хочется — продакшн всегда использует
+    /// `ContinuousClock`. Возвращаем pacer reference в тест через `runCycle`
+    /// нельзя (actor isolation), поэтому даём перезаливку.
+    func _setPacerClock(now: @escaping @Sendable () -> ContinuousClock.Instant) {
+        self.pacer = FramePacer(interval: captureInterval, now: now)
+    }
+
+    /// Тестовый seam: один прогон pacer'а без обращения к SCStream и OCR.
+    /// Возвращает `true` если кадр был бы admitted (то есть pacer пропустил
+    /// бы pipeline дальше).
+    func _admitForTest() -> Bool {
+        pacer.shouldAdmit()
     }
 
     public func stateFileURL() -> URL { stateFilePath }
@@ -79,14 +101,35 @@ public actor VisionActor {
             Self.log.info("capture loop stopped")
         }
 
+        // Внешний sleep больше не authoritative-pacing: реальный gate —
+        // `FramePacer` внутри runCycle (FCP-1). Здесь оставлен короткий
+        // poll-interval как cooperative-yield + защита от hot-spin (когда
+        // `latestFrame()` возвращает один и тот же кадр многократно).
+        // Берём min(captureInterval, 100ms): для маленьких captureInterval
+        // (например 0 — throttle off) не хотим спать дольше, чем pacer
+        // допустит обработку.
+        let pollInterval = pollIntervalFor(captureInterval)
+
         while isCapturing && !Task.isCancelled {
             await runCycle()
             do {
-                try await Task.sleep(for: captureInterval)
+                try await Task.sleep(for: pollInterval)
             } catch {
                 break
             }
         }
+    }
+
+    /// Polling-кадр-интервал. Быстрее, чем `captureInterval`, но не настолько,
+    /// чтобы спалить CPU. Для `captureInterval == 0` (throttle off) тоже
+    /// кладём минимальный sleep — без него цикл превращается в busy-loop.
+    private func pollIntervalFor(_ interval: Duration) -> Duration {
+        let upperBoundMs = 100
+        let intervalMs = interval.inMilliseconds
+        if intervalMs <= 0 {
+            return .milliseconds(10)
+        }
+        return .milliseconds(min(upperBoundMs, max(10, intervalMs / 4)))
     }
 
     public func stopCapture() {
@@ -126,9 +169,22 @@ public actor VisionActor {
 
         guard let box = await screenStream.latestFrame() else {
             // ещё не пришёл первый кадр (или TCC denied). Просто ждём.
+            // Pacer не трогаем: дроп без админa = окно остаётся открытым,
+            // как только реальный кадр придёт — он будет admitted.
             skipped = true
             return
         }
+
+        // FCP-1: внутренний throttle. Если кадр пришёл раньше окна
+        // `captureInterval` — дропаем, не вызывая ни digest, ни OCR, ни
+        // redact, ни ContextStore. Без буферизации — ровно как требует
+        // ADR 0011.
+        guard pacer.shouldAdmit() else {
+            Self.signposter.emitEvent("framePacerDropped", id: .exclusive)
+            skipped = true
+            return
+        }
+
         let image = box.image
 
         // Frame-diff: пропускаем OCR на не изменившихся экранах.
@@ -201,10 +257,20 @@ public actor VisionActor {
     }
 }
 
-/// Helper: `Duration.toSeconds` — public нет, реконструируем из components.
+/// Helper: `Duration.toSeconds` / `inMilliseconds` — public нет,
+/// реконструируем из components.
 private extension Duration {
     var toSeconds: Double {
         let comp = components
         return Double(comp.seconds) + Double(comp.attoseconds) / 1e18
+    }
+
+    /// Округлённое количество миллисекунд (Int, может быть 0). Используется
+    /// для polling-интервала: точность до 1ms здесь избыточна.
+    var inMilliseconds: Int {
+        let comp = components
+        let ms = comp.seconds * 1_000 + comp.attoseconds / 1_000_000_000_000_000
+        // attoseconds — Int64; для разумных Duration не переполняется в Int.
+        return Int(ms)
     }
 }
