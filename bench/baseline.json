@@ -59,5 +59,53 @@
     "memory_pressure_raw": "The system has 8589934592 (524288 pages with a page size of 16384).\n\nStats: \nPages free: 4030 \nPages purgeable: 0 \nPages purged: 296279486 \n\nSwap I/O:\nSwapins: 65763480 \nSwapouts: 71020695 \n\nPage Q counts:\nPages active: 76385 \nPages inactive: 70012 \nPages speculative: 5648 \nPages throttled: 0 \nPages wired down: 144138 \n\nCompressor Stats:\nPages used by compressor: 186587 \nPages decompressed: 3484563541 \nPages compressed: 4093311854 \n\nFile I/O:\nPageins: 244794163 \nPageouts: 3327908 \n\nSystem-wide memory free percentage: 31%",
     "froggy_status": "null",
     "froggy_pressure": "{\"pageoutCounters\":{\"scratchSucceeded\":0,\"machVMFailed\":0,\"jetsamAttempted\":0,\"machVMSucceeded\":0,\"jetsamFailed\":0,\"machVMAttempted\":0,\"scratchFailed\":0,\"scratchAttempted\":0,\"jetsamSucceeded\":0},\"pressureLevel\":\"normal\",\"ok\":true,\"tier1Frozen\":[],\"tier2Frozen\":[],\"secondsInLevel\":15,\"final\":true}"
+  },
+  {
+    "schema_version": 2,
+    "captured_at": "2026-05-07T14:46:59Z",
+    "scenario": "under-pressure",
+    "daemon_rss_kb": 26288,
+    "daemon_rss_kb_distribution": {
+      "min": 21568,
+      "median": 26288,
+      "max": 29968,
+      "mean": 25939,
+      "samples": [
+        21568,
+        24032,
+        26224,
+        26272,
+        26288,
+        29968,
+        26480,
+        26448,
+        26560,
+        25552
+      ]
+    },
+    "worker_rss_kb": 14992,
+    "worker_rss_kb_distribution": {
+      "min": 11936,
+      "median": 14992,
+      "max": 17408,
+      "mean": 14032,
+      "samples": [
+        15008,
+        15008,
+        15008,
+        14992,
+        17408,
+        14224,
+        12144,
+        12144,
+        11936,
+        12448
+      ]
+    },
+    "ttft_ms": null,
+    "vm_stat_raw": "Mach Virtual Memory Statistics: (page size of 16384 bytes)\nPages free:                                4438.\nPages active:                             67347.\nPages inactive:                           60724.\nPages speculative:                         5394.\nPages throttled:                              0.\nPages wired down:                        148403.\nPages purgeable:                              2.\n\"Translation faults\":                7808858528.\nPages copy-on-write:                   97443874.\nPages zero filled:                   1281650187.\nPages reactivated:                   3502960354.\nPages purged:                         308576881.\nFile-backed pages:                        46916.\nAnonymous pages:                          86549.\nPages stored in compressor:             1343561.\nPages occupied by compressor:            200929.\nDecompressions:                      3689984860.\nCompressions:                        4311573202.\nPageins:                              256009270.\nPageouts:                               3423562.\nSwapins:                               68833300.\nSwapouts:                              74385964.",
+    "memory_pressure_raw": "The system has 8589934592 (524288 pages with a page size of 16384).\n\nStats: \nPages free: 4332 \nPages purgeable: 2 \nPages purged: 308576881 \n\nSwap I/O:\nSwapins: 68833300 \nSwapouts: 74385964 \n\nPage Q counts:\nPages active: 67406 \nPages inactive: 60735 \nPages speculative: 5404 \nPages throttled: 0 \nPages wired down: 148412 \n\nCompressor Stats:\nPages used by compressor: 200880 \nPages decompressed: 3689984860 \nPages compressed: 4311573202 \n\nFile I/O:\nPageins: 256009277 \nPageouts: 3423562 \n\nSystem-wide memory free percentage: 27%",
+    "froggy_status": "capturing        yes\nmodel_loaded     yes\nmodel_path       /Users/yaroslav/models/llama-3.2-1b-4bit\nmemory_pressure  84%\nfrozen_procs     1\nsnapshots        1\ncapture_error    —",
+    "froggy_pressure": "{\"pressureLevel\":\"warning\",\"tier1Frozen\":[16716],\"tier2Frozen\":[],\"final\":true,\"ok\":true,\"pageoutCounters\":{\"machVMSucceeded\":0,\"scratchSucceeded\":1,\"scratchFailed\":0,\"scratchAttempted\":1,\"jetsamSucceeded\":0,\"machVMAttempted\":0,\"jetsamFailed\":1,\"machVMFailed\":0,\"jetsamAttempted\":1},\"secondsInLevel\":27}"
   }
 ]

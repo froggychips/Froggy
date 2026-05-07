@@ -40,20 +40,15 @@ git add bench/baseline.json && git commit -m "bench: baseline до Уровня 
 * Контракт PR'а: один общий — `Mem-3.1 fake worker + Mem-4 KV-cache`,
   как описано в новом плане Уровня 1.
 
-### Metallib regression (БЛОКЕР AD-1) — ADR 0013
+### Metallib regression — закрыто (ADR 0013 → Resolved)
 
-Validation gate (ADR 0011) поймал: real-model loading не работает в
-`swift build` release-сборке, потому что `default.metallib` не
-собирается через SwiftPM. Worker умирает с «Failed to load default
-metallib» на первой MLX-операции. См. ADR 0013 — пути решения и почему
-fix не сделан в bench-сессии.
+Path 1 реализован: `scripts/compile-metallib.sh` + Makefile + post-build
+copy в `.build/<config>/Resources/default.metallib`. `make build` —
+канонический entry point. `bench/cycles_test.sh` 5/5 циклов load/unload
+прошёл, `worker_rss_kb=null` после каждого unload, daemon не падает.
+ADR 0011 validation gate закрыт 4/4.
 
-До фикса:
-* AD-1 / FCP-1 / EXP-1 — заблокированы.
-* `bench/cycles_test.sh` — оставлен для использования после фикса.
-* Тесты — не трогать `FroggyMLXWorkerFake`.
-
-### Уровень 1.5 (после baseline-bench И metallib fix'а)
+### Уровень 1.5 (validation gate закрыт — можно стартовать)
 
 Когда `bench/baseline.json` в main, model-loaded snapshot захвачен,
 и цифры разумны:
