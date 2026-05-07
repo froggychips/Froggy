@@ -22,7 +22,7 @@ daemon, so you can drive it from any language.
 **Status:** working personal-use scaffolding. Not a product. See
 [`docs/POSITIONING.md`](docs/POSITIONING.md) for what this is and isn't.
 
-📖 [POSITIONING](docs/POSITIONING.md) · [ADRs](docs/adr/) · [Packaging](packaging/README.md)
+📖 [THESIS](docs/THESIS.md) · [POSITIONING](docs/POSITIONING.md) · [ADRs](docs/adr/) · [Packaging](packaging/README.md)
 📬 Contact: [@froggychips](https://t.me/froggychips) on Telegram
 📜 License: [MIT](LICENSE)
 
