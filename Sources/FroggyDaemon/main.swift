@@ -2,6 +2,7 @@ import Darwin
 import Dispatch
 import Foundation
 import LushaBridge
+import LushaExperimental
 import VortexCore
 import os
 
@@ -110,9 +111,18 @@ struct FroggyDaemon {
             frameSimilarityThreshold: config.frameSimilarityThreshold
         )
 
+        // Generic registration: main.swift не знает о конкретных
+        // аксессорах, только о регистраторах. Добавление нового модуля
+        // (experimental или core) — одна строка ниже, не правка инициализации
+        // отдельных типов. См. ADR 0011 § EXP-1.
         let registry = AccessorRegistry()
-        await registry.register(OCRAccessor(store: contextStore))
-        await registry.register(FrontmostAppAccessor())
+        let registrars: [any AccessorRegistrar] = [
+            LushaBridgeRegistrar(contextStore: contextStore),
+            LushaExperimentalRegistrar(),
+        ]
+        for registrar in registrars {
+            await registrar.register(into: registry)
+        }
 
         installSignalHandlers(coordinator: coordinator)
 
@@ -310,11 +320,13 @@ struct DaemonIPCHandler: IPCRequestHandler, Sendable {
             return .success()
 
         case "accessors":
-            let descriptors = await registry.list()
+            // Фильтр по `experimental`: nil — вернуть все, true/false —
+            // только опытные / только core. ADR 0011 § EXP-1.
+            let descriptors = await registry.list(experimental: request.experimental)
             var r = IPCResponse()
             r.ok = true
             r.accessors = descriptors.map {
-                IPCResponse.Accessor(id: $0.id, name: $0.name)
+                IPCResponse.Accessor(id: $0.id, name: $0.name, experimental: $0.experimental)
             }
             r.final = true
             return r

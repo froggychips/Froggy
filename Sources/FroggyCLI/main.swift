@@ -22,7 +22,7 @@ struct FroggyCLI {
             case "ctx", "context": try await Self.runContext(client, rest)
             case "load": try await Self.runLoad(client, rest)
             case "unload": try await Self.runUnload(client)
-            case "accessors": try await Self.runAccessors(client)
+            case "accessors": try await Self.runAccessors(client, rest)
             case "snap", "snapshot": try await Self.runSnapshot(client, rest)
             case "thaw": try await Self.runThaw(client)
             case "-h", "--help", "help":
@@ -132,13 +132,26 @@ struct FroggyCLI {
         else { stderr(r.error ?? "unload failed"); exit(1) }
     }
 
-    private static func runAccessors(_ client: IPCClient) async throws {
-        let r = try await client.accessors()
+    private static func runAccessors(_ client: IPCClient, _ args: [String]) async throws {
+        // `--experimental` / `--core` фильтруют список на стороне
+        // демона. Без флага — все аксессоры. См. ADR 0011 § EXP-1.
+        var filter: Bool?
+        for a in args {
+            switch a {
+            case "--experimental": filter = true
+            case "--core": filter = false
+            default:
+                stderr("unknown flag: \(a)\nusage: froggy accessors [--experimental|--core]")
+                exit(2)
+            }
+        }
+        let r = try await client.accessors(experimental: filter)
         guard r.ok == true, let list = r.accessors else {
             stderr(r.error ?? "accessors failed"); exit(1)
         }
         for a in list {
-            print("\(a.id)\t\(a.name)")
+            let tag = (a.experimental == true) ? "  [experimental]" : ""
+            print("\(a.id)\t\(a.name)\(tag)")
         }
     }
 
@@ -182,7 +195,7 @@ struct FroggyCLI {
       ctx [--max N]                       print recent context window
       load <model-path>                   hot-swap MLX model
       unload                              unload current model
-      accessors                           list registered LushaAccessors
+      accessors [--experimental|--core]   list registered LushaAccessors
       snap <accessor-id>                  run one accessor and print its lines
       thaw                                SIGCONT all frozen processes
       help                                this message

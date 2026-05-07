@@ -17,8 +17,17 @@ private struct CountingHandler: IPCRequestHandler {
             r.modelPath = path
             return r
         case "accessors":
+            // EXP-1: симулируем фильтр на стороне сервера.
+            let core: [IPCResponse.Accessor] = [.init(id: "ocr", name: "Screen OCR")]
+            let exp: [IPCResponse.Accessor] = [
+                .init(id: "thermal", name: "Process Thermal State", experimental: true),
+            ]
             r.ok = true
-            r.accessors = [.init(id: "ocr", name: "Screen OCR")]
+            switch request.experimental {
+            case .some(true): r.accessors = exp
+            case .some(false): r.accessors = core
+            case .none: r.accessors = core + exp
+            }
             return r
         case "snapshot":
             r.ok = true
@@ -65,11 +74,29 @@ final class IPCClientTests: XCTestCase {
         try await runWithServer { path in
             let client = IPCClient(socketPath: path)
             let list = try await client.accessors()
-            XCTAssertEqual(list.accessors?.count, 1)
-            XCTAssertEqual(list.accessors?.first?.id, "ocr")
+            // Без фильтра возвращаются и core, и experimental.
+            XCTAssertEqual(list.accessors?.count, 2)
+            XCTAssertEqual(list.accessors?.map(\.id).sorted(), ["ocr", "thermal"])
 
             let snap = try await client.snapshot(accessorId: "ocr")
             XCTAssertEqual(snap.lines, ["snap-of-ocr"])
+        }
+    }
+
+    // EXP-1: фильтр доезжает через wire, и descriptor experimental
+    // сохраняется при roundtrip'е.
+    func testAccessorsExperimentalFilter() async throws {
+        try await runWithServer { path in
+            let client = IPCClient(socketPath: path)
+            let onlyExp = try await client.accessors(experimental: true)
+            XCTAssertEqual(onlyExp.accessors?.count, 1)
+            XCTAssertEqual(onlyExp.accessors?.first?.id, "thermal")
+            XCTAssertEqual(onlyExp.accessors?.first?.experimental, true)
+
+            let onlyCore = try await client.accessors(experimental: false)
+            XCTAssertEqual(onlyCore.accessors?.count, 1)
+            XCTAssertEqual(onlyCore.accessors?.first?.id, "ocr")
+            XCTAssertNil(onlyCore.accessors?.first?.experimental)
         }
     }
 
