@@ -174,6 +174,84 @@ Composite-уровень `.normal/.warning/.critical` собирается из
 Заблокирован до AD-1 / FCP-1 / EXP-1 в main (Уровень 1.5). Идёт
 параллельно Уровню 2 — порядок по приоритетам, не строго.
 
+## Obs-1 — Jetsam observer + unified log как honest signal (заблокирован до Уровня 1.5 в main)
+
+Сейчас «работает ли freeze» решается косвенно: pageout counters,
+`secondsInLevel`-distribution, RSS-замеры. Прямой сигнал — kernel сам
+пишет jetsam-kill events в unified log (subsystem `com.apple.kernel`,
+сообщения семейства `memorystatus_do_kill` / `jetsam`). Это закрывает
+honest-signal gap из ADR-0011: было ли убийство OS-ом после наших
+freeze'ов или нет. Не «pageouts были», а «никого не убили / убили X».
+
+### Что добавить
+
+* `JetsamObserver` actor — подписка на kernel jetsam events через
+  один из:
+  - `OSLogStore.local()` + `getEntries(at: position, matching: ...)`
+    — Apple-blessed reader, sandboxing-config или entitlement.
+  - `Process` → `log stream --predicate 'subsystem == "com.apple.kernel"
+    AND eventMessage CONTAINS "memorystatus"'` — без entitlement,
+    через подпроцесс. Pragmatic путь.
+* Парсер: PID, имя процесса (если не редактирован), reason (highwater
+  / no-pages / vm-thrashing). Структурированный event в
+  `FreezeStatsStore` — новая таблица `jetsam_events`.
+* IPC `jetsamStats` — кол-во OS-kills с timestamp'ами, по bundle_id.
+* MenuBar — отдельная панель «kills since Froggy started» как honest
+  счётчик «защитили ли мы или нет».
+* ADR-XXXX — observation-source architecture (read-only аналог
+  `MemoryPressureSource` / `PowerPressureSource`).
+
+### Что переиспользуется
+
+* `FreezeStatsStore` (SQLite) — добавить таблицу.
+* `ProcessClassifier` — маппинг PID/имя в bundle_id.
+* IPC/MenuBar — добавить новые команды/панель.
+
+### Honest caveats — обязательная часть ADR
+
+* **Private-redaction в production.** В default-конфиге macOS многие
+  jetsam-сообщения помечены `private`, и `log stream` отдаёт
+  `<private>` вместо PID/имени. Лечится `sudo log config --mode
+  "private_data:on"` (developer-mode):
+  - **OK для dev/baseline** — у тебя developer-mode скорее всего on.
+  - **Слепая зона у пользователя** — в prod без developer-mode мы
+    видим только факт kill'а без имени процесса.
+  - В ADR честно зафиксировать: Obs-1 — dev/honest-signal feature,
+    не user-facing observability. Альтернатива на prod: `proc_listpids`
+    polling до/после, или MetricKit `MXAppLaunchMetric` + exit
+    reasons, или sysdiagnose-парсинг (overkill).
+* **Brittleness формата.** Текст kernel-сообщений между релизами
+  macOS может меняться. Predicate жёсткий (subsystem + eventMessage
+  CONTAINS), плюс integration test на текущей версии. Каждый major
+  macOS bump — пере-валидация.
+* **Privacy hygiene на нашей стороне.** Перед включением jetsam log
+  stream'а — пройти все `os_log` call-sites Froggy и проверить, что
+  bundle_id / window-title помечены `privacy: .private`. Иначе мы
+  льём пользовательские данные в system log одновременно с тем, как
+  с него читаем. См. отдельный хвост.
+* **Performance.** `log stream` без predicate жжёт CPU. Predicate
+  обязателен и жёсткий. Подпроцесс `log` через `Process` — отдельный
+  failure mode (если упадёт — observer слепнет, нужен restart по
+  той же логике, что `MLXSupervisor`).
+
+### Validation gate
+
+Прежде чем имплементировать — снять `bench/jetsam-baseline.json`:
+
+* Сколько jetsam-kills происходит за час при типичной нагрузке
+  **БЕЗ** Froggy (under-pressure scenario из ADR-0011).
+* Сколько при включённом Froggy на той же нагрузке.
+
+Если delta = 0 — **остановиться**, документировать null result, не
+имплементировать дальше observation infra (наблюдать-то нечего:
+freeze работает идеально, kernel kills не доходит). Тот же
+honest-stop паттерн, что и для memory/power baseline.
+
+### Не сейчас
+
+Заблокирован до AD-1 / FCP-1 / EXP-1 в main (Уровень 1.5). Идёт
+параллельно Power-1 / Уровню 2 — порядок по приоритетам.
+
 ## Зерна из external review (Grok, 2026-05-07)
 
 Из проходного внешнего review-цикла — то, что не нарушает ADR-0011 и
@@ -229,3 +307,12 @@ Composite-уровень `.normal/.warning/.critical` собирается из
   следующей сессии Claude Code — текущая их не подхватит.
 * Git committer email = `yaroslav@JabBook-Air-m3.local` (machine
   hostname) — `git config --global user.email …` со стороны пользователя.
+* **Privacy audit всех `os_log` call-sites.** Один проход grep'ом по
+  `Sources/**/*.swift` — все ли строки с `bundleId` / `windowTitle` /
+  user-data помечены `privacy: .private`. Иначе мы льём пользовательские
+  данные в system log, читаемый локальными админами. Префикс к Obs-1:
+  прежде чем читать unified log — перестать в него лить.
+* **`make logbundle`.** Тривиальный shell-скрипт обёртка вокруг
+  `log collect --predicate 'subsystem == "com.froggychips.froggy"'
+  --output froggy.logarchive` — для bug reports от будущих внешних
+  пользователей. Без entitlement'ов, без кода.
