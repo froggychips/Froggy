@@ -45,6 +45,8 @@ public struct IPCResponse: Codable, Sendable {
     public var lines: [String]?
     public var accessors: [Accessor]?
     public var lastCaptureError: String?
+    /// Mem-5 cmd `freezeStats`: топ-N bundle_id по медиане освобождения.
+    public var freezeStats: [FreezeStatsStore.AggregatedStats]?
     /// Текущий уровень давления (`normal`/`warning`/`critical`) — для cmd `pressure`.
     public var pressureLevel: String?
     /// Pids, замороженные политикой tier-1 (warning).
