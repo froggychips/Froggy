@@ -107,6 +107,73 @@ frontmost-приложений. Делается пользователем по
 * Voice (Whisper + TTS, OpenAI Realtime).
 * Takeout-ingest (загрузка экспортов из других сервисов в context store).
 
+## Power-1 — energy/thermal management (заблокирован до Уровня 1.5 в main)
+
+Принцип тот же, что у memory pressure: kernel/system сигналит →
+`PressureSource` → `VortexCoordinator` → SIGSTOP по tier'ам.
+Архитектурный delta минимальный — переиспользуются `VortexFreezing`,
+`FrozenPidsStore`, `ProcessClassifier`, `FreezeRanker`. ADR обязателен
+(новый класс сигнала, аналог ADR-0006/0007 для memory).
+
+### Сигналы (composite — единого `dispatch_source` под энергию нет)
+
+* `ProcessInfo.thermalState` — `nominal/fair/serious/critical`,
+  `NSProcessInfoThermalStateDidChangeNotification`. Реактивно, 4 ступеньки.
+* `ProcessInfo.isLowPowerModeEnabled` +
+  `NSProcessInfoPowerStateDidChangeNotification` — boolean user-toggle.
+* IOKit `IOPSCopyPowerSourcesInfo` — on AC / на батарее, % charge,
+  time-to-empty. Не реактивно, polling ~30s.
+* `proc_pid_rusage` → `ri_energy` (RUSAGE_INFO_V4+) — нДж per-process.
+  Counter, EWMA-окно за period; расширяется существующий
+  `ProcessRusage.swift`.
+
+Composite-уровень `.normal/.warning/.critical` собирается из
+`thermalState` + `isLowPowerMode` + on-battery + battery%. Конкретный
+маппинг — в ADR.
+
+### Что добавить
+
+* `PowerPressureSource` protocol + `DispatchPowerPressureSource` /
+  `FakePowerPressureSource` (analog `MemoryPressureSource`).
+* `PowerPressureMonitor` — composite signal aggregator + derived level.
+* `ProcessRusage` — чтение `ri_energy`, EWMA per-pid за окно.
+* Параллельный feedback-loop в `VortexCoordinator` либо общий с
+  power-tier overlays поверх memory-tier.
+* Конфиг: `freezePowerTier1BundleIds`, energy thresholds (Дж/с).
+* ADR-XXXX — power-pressure architecture.
+
+### Honest caveats — без этого не стартовать
+
+* **Tier-листы RAM ≠ power.** Slack/Teams/Electron лёгкие по RAM,
+  тяжёлые по wakeups. Либо разводить конфиг, либо overlay-policy
+  в `FreezeRanker`.
+* **Frontmost-app дороже всех фоновых вместе** при типичной нагрузке
+  (браузер с видео). Реальный win Power-1 — на тепловом критикале и
+  на конкретных misbehaving background apps; не «давайте экономить
+  вообще».
+* **macOS уже агрессивно гасит фон на batt** (App Nap, network
+  throttling, process suspension). Дельта от SIGSTOP поверх этого —
+  мерить на baseline ДО имплементации, не после.
+
+### Validation gate (по аналогии с ADR-0011)
+
+Прежде чем имплементировать — снять `bench/power-baseline.json`:
+
+* Дж/мин типичного idle-фона на batt без Froggy.
+* Дж/мин Slack/Teams/Electron-apps в фоне за час.
+* `thermalState` distribution на типичной нагрузке (Xcode build +
+  YouTube + Slack).
+* `isLowPowerMode` events на реальном использовании за неделю.
+
+Если фон даёт <5% energy share от total — **остановиться**,
+документировать null result, не имплементировать. Тот же honest-stop
+паттерн, что и для memory baseline.
+
+### Не сейчас
+
+Заблокирован до AD-1 / FCP-1 / EXP-1 в main (Уровень 1.5). Идёт
+параллельно Уровню 2 — порядок по приоритетам, не строго.
+
 ## Зерна из external review (Grok, 2026-05-07)
 
 Из проходного внешнего review-цикла — то, что не нарушает ADR-0011 и
