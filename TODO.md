@@ -362,6 +362,135 @@ cache flush через `purgeable` API».
 Заблокирован до AD-1 / FCP-1 / EXP-1 в main (Уровень 1.5). Идёт
 параллельно Power-1 / Obs-1 / Уровню 2 — порядок по приоритетам.
 
+## MLX-LM-1 — inference config + advanced features audit (заблокирован до Уровня 1.5 в main)
+
+Сейчас MLX-инференс работает на defaults: что-то заводское из
+`mlx-swift-lm`, без явной экспозиции sampling параметров в IPC, без
+проверки enabled-by-default ли flash-attention в нашей версии, без
+оценки speculative decoding ROI на 8 GB. Generation-quality wins
+лежат **внутри** текущего MLX-пути, не требуют архитектурных
+изменений — но требуют audit'а и явной конфигурации.
+
+### Что добавить
+
+* **Sampling parameters в IPC `generate`** — `temperature`, `top_p`,
+  `top_k`, `min_p`, `repetition_penalty`. Сейчас, скорее всего,
+  defaults (проверить). Exposed через `generationDefaults` в config
+  + per-request override через IPC.
+* **Flash attention status check.** Проверить enabled-by-default в
+  текущей mlx-swift или нужен явный флаг. Уменьшает память на
+  длинных context'ах — критично для context-aware режима с большим
+  OCR window.
+* **`MLX.Memory.reclaim()`** если доступен в текущей mlx-swift —
+  более агрессивно возвращает память system'у, чем `clearCache()`.
+  Использовать в `unloadModel` parallel-fallback'ом.
+* **Chat template integration test.** Сейчас auto-detect от
+  HuggingFace tokenizer. Зафиксировать xctest, что для текущей
+  модели (Qwen3-4B) prompt format корректен. При смене модели —
+  тест ловит формат-несоответствие до того как silently degraded
+  generation попадает в prod.
+* **Speculative decoding ROI assessment.** Draft model + verifier =
+  ~1.5-2x speedup, но требует ~0.5B draft = +0.3-0.5 GB RAM.
+  На 8 GB margin — оценить, влезает ли через validation-gate-style
+  cycle (load draft + main + наблюдать `worker_rss_kb` distribution).
+* IPC `generationConfig` get/set команды — runtime introspection.
+* MenuBar — отдельная debug-панель «sampling controls» для
+  exploration, не daily UX.
+
+### Что переиспользуется
+
+* `FroggyMLXWorker` IPC protocol — расширить generation-параметрами
+  (backward-compatible через optional fields).
+* `MLXSupervisor` — без изменений, прокидывает новые args в worker.
+
+### Honest caveats
+
+* **Это hygiene, не feature.** Audit current MLX path — может
+  закончиться null result'ом «defaults уже хорошие, нечего
+  улучшать», и это **успешный** outcome, не провал.
+* **Speculative decoding на 8 GB — узкий margin.** Если draft
+  модель не помещается рядом с main — отвергаем, документируем,
+  не имплементируем. Honest-stop по той же логике что Power-1 /
+  Obs-1 / Mem-purgable-1.
+* **Sampling tweakability — risk for users.** Exposed parameters
+  легко настроить плохо (high temp + high top_k = хаос). Defaults
+  должны оставаться разумными; tweakability — для exploration, не
+  daily user knob.
+
+### Validation gate
+
+Прежде чем имплементировать — снять `bench/inference-baseline.json`:
+
+* Tokens/sec на defaults для текущей модели (idle / model-loaded
+  scenarios из ADR-0011).
+* Memory headroom на текущей модели (`worker_rss_kb` запас под
+  draft).
+* Honest answer: «есть ли вообще что улучшать?». Если defaults
+  дают acceptable tok/s — sampling-exposure единственный win,
+  остальное skipped.
+
+### Не сейчас
+
+Заблокирован до AD-1 / FCP-1 / EXP-1 в main (Уровень 1.5). Идёт
+параллельно Power-1 / Obs-1 / Mem-purgable-1 / Уровню 2.
+
+## RFC-Foundation-Models-Path — explore перед стартом Уровня 2 design (не сейчас)
+
+**Не TODO-эпик, а закладка для архитектурного решения.** Между
+закрытием Уровня 1.5 и стартом первого design-doc'а Уровня 2 —
+обязательная exploration-фаза: что из Уровня 2 покрывается Apple
+`FoundationModels` framework (macOS 26+, M-series, Apple
+Intelligence-enabled) и что остаётся MLX-only.
+
+`FoundationModels` даёт on-device LLM (~3B) с structured output,
+tool-calling, streaming, без сети:
+
+```swift
+import FoundationModels
+let session = LanguageModelSession()
+let response = try await session.respond(to: prompt)
+```
+
+Это **второй inference-путь**, не drop-in замена MLX:
+
+* **Покрывает**: chat-LLM common case, 8 GB-friendly by Apple's
+  design, managed weights/quantization, ANE-acceleration где
+  возможно.
+* **Не покрывает**: custom модели (Qwen / Llama / fine-tuned),
+  KV-cache control, speculative decoding, sampling tunability,
+  машины без Apple Intelligence enabled.
+
+### Что должно быть в exploration
+
+* Что из Уровня 2 (voice / VLM / persona-router) **уже** есть у
+  Apple на FoundationModels-стеке: Speech, on-device
+  vision-language, system-level. Устаревает ли наша роадмапа
+  перед стартом design'а?
+* Что из substrate'а Froggy остаётся релевантным:
+  - **Memory management фоновых apps** — да, не зависит от
+    inference path.
+  - **Subprocess isolation MLX (ADR-0008)** — становится
+    опциональным для FoundationModels-пути (Apple internally
+    управляет RAM).
+  - **Vision OCR + Redactor + ContextStore** — да, не зависят.
+  - **PageoutChain, FreezeRanker, FreezeStatsStore** — да, не
+    зависят от LLM-стека.
+* Возможные исходы (фиксируется в ADR):
+  - **A**. FoundationModels primary, MLX fallback для custom
+    моделей. Substrate упрощается на common case.
+  - **B**. MLX primary, FoundationModels не используем (слишком
+    ограничен / нужен полный контроль). Substrate как сейчас.
+  - **C**. Hybrid orchestrator с runtime routing. Сложнее, оба
+    мира, оба code path'а maintain'ятся.
+
+### Почему не сейчас
+
+ADR-0014 запрещает Уровень-2 design до закрытия Уровня 1.5. Этот
+RFC — **между** ними, не вместо них и не блокирует AD-1/FCP-1/EXP-1.
+Просто закладка чтобы через год не обнаружить, что substrate-cycles
+тратились на проблему, которую Apple предоставила бесплатно. ADR
+обязателен на любом исходе exploration'а.
+
 ## Зерна из external review (Grok, 2026-05-07)
 
 Из проходного внешнего review-цикла — то, что не нарушает ADR-0011 и
@@ -424,6 +553,19 @@ cache flush через `purgeable` API».
   config reload, model checkpoint changes, или user-data tracking
   для context store. Без polling. Низкий приоритет — нет конкретной
   задачи под него.
+* **`VNGenerateImageFeaturePrintRequest` как замена `FrameDigest`.**
+  Apple-blessed perceptual hash (768-dim feature vector) учитывает
+  семантику кадра, не pixel similarity — меньше false-positive
+  (смена color theme), меньше false-negative (контент тот же,
+  передвинут). Стоимость: тяжелее посчитать, но кэшируется. При
+  следующем касании FrameDigest — рассмотреть как замену через
+  bench (similarity-quality + compute cost).
+* **`VNClassifyImageRequest` как pre-OCR router.** ~1000 labels per
+  frame ("text", "code editor", "video", "game"). Дешёвый router:
+  если frame классифицируется как «video» — OCR не запускается,
+  context update пропускается. CPU-win + signal-quality (нет
+  бессмысленного OCR на видео-плеере). Promising для FCP-1
+  contention'а frame-budget'а.
 
 ### Не для нас (зафиксировано чтобы не возвращаться)
 
@@ -483,3 +625,20 @@ cache flush через `purgeable` API».
   Interest визуализирует frame-budget, OCR latency, freeze-cycle
   duration. Также для bench: `xctrace` profile вместо собственного
   timing-кода. Аккуратно в hot paths, не везде.
+* **Mach exception ports для self-crash forensics.** Когда сам
+  `FroggyDaemon` падает (assertion failure, EXC_BAD_ACCESS), сейчас
+  у нас нет stack trace'а — kernel шлёт SIGKILL и тишина. Установить
+  `task_set_exception_ports(EXC_MASK_ALL, ...)` + thread читает
+  exception messages, дампит stack в `os.Logger` с
+  `privacy: .private`, потом re-raise. Niche reliability, но
+  combined с `make logbundle` — лучшая forensics на user-machine.
+* **`os_proc_available_memory()` в `VortexActor`.** Apple API,
+  возвращает доступный memory budget для текущего процесса.
+  Дополняет `host_statistics64(HOST_VM_INFO64)` собственным
+  «сколько мне осталось», без пересчёта через free-pages вручную.
+  Маленький helper, hygiene.
+* **`actions/checkout@v4` Node.js 20 deprecation.** Self-hosted CI
+  warning'ит про deprecation в сентябре 2026. Обновить до v5+
+  (когда выйдет) или установить env flag
+  `FORCE_JAVASCRIPT_ACTIONS_TO_NODE24=true` в workflow. Не error —
+  просто warning, не блокирует, но к Q3 2026 надо закрыть.
