@@ -45,6 +45,7 @@ public actor PageoutChain {
     private let scratch: any PageoutImpl
 
     private var loggedFailureFor: Set<PageoutStrategy> = []
+    private var counters: PageoutCounters = .init()
 
     public init(
         preferred: PageoutStrategy = .jetsam,
@@ -58,6 +59,11 @@ public actor PageoutChain {
         self.scratch = scratch
     }
 
+    /// Кумулятивные счётчики попыток/успехов/провалов pageout —
+    /// отдаются в IPC `pressure` для observability (без них не понять,
+    /// работает ли jetsam в данном сетапе).
+    public func currentCounters() -> PageoutCounters { counters }
+
     public func pageout(pid: Int32) async -> PageoutOutcome {
         let order: [(PageoutStrategy, any PageoutImpl)]
         switch preferred {
@@ -67,13 +73,16 @@ public actor PageoutChain {
         }
 
         for (strategy, impl) in order {
+            counters.bump(strategy, .attempted)
             let outcome = await impl.pageout(pid: pid)
             switch outcome {
             case .success:
+                counters.bump(strategy, .succeeded)
                 return outcome
             case .skipped:
                 return outcome
             case .failed(let reason):
+                counters.bump(strategy, .failed)
                 if !loggedFailureFor.contains(strategy) {
                     loggedFailureFor.insert(strategy)
                     Self.log.warning("pageout strategy \(strategy.rawValue, privacy: .public) failed (\(reason, privacy: .public)); falling back")
@@ -82,6 +91,37 @@ public actor PageoutChain {
             }
         }
         return .failed(reason: "all pageout strategies failed for pid \(pid)")
+    }
+}
+
+/// Кумулятивные счётчики pageout для IPC `pressure`. Не сбрасываются.
+public struct PageoutCounters: Sendable, Codable, Equatable {
+    public var machVMAttempted: Int = 0
+    public var machVMSucceeded: Int = 0
+    public var machVMFailed: Int = 0
+    public var jetsamAttempted: Int = 0
+    public var jetsamSucceeded: Int = 0
+    public var jetsamFailed: Int = 0
+    public var scratchAttempted: Int = 0
+    public var scratchSucceeded: Int = 0
+    public var scratchFailed: Int = 0
+
+    public enum Slot: Sendable { case attempted, succeeded, failed }
+
+    public init() {}
+
+    public mutating func bump(_ strategy: PageoutStrategy, _ slot: Slot) {
+        switch (strategy, slot) {
+        case (.machVM, .attempted): machVMAttempted += 1
+        case (.machVM, .succeeded): machVMSucceeded += 1
+        case (.machVM, .failed): machVMFailed += 1
+        case (.jetsam, .attempted): jetsamAttempted += 1
+        case (.jetsam, .succeeded): jetsamSucceeded += 1
+        case (.jetsam, .failed): jetsamFailed += 1
+        case (.scratch, .attempted): scratchAttempted += 1
+        case (.scratch, .succeeded): scratchSucceeded += 1
+        case (.scratch, .failed): scratchFailed += 1
+        }
     }
 }
 

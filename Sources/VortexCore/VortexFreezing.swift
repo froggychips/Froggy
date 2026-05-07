@@ -9,6 +9,13 @@ public protocol VortexFreezing: Sendable {
     func thawProcess(pid: Int32) async
     func thawAll() async
     func suspendedCount() async -> Int
+    /// Текущие счётчики pageout (если pageout вообще включён).
+    /// Default-implementation возвращает nil — для тестовых стабов.
+    func pageoutCounters() async -> PageoutCounters?
+}
+
+extension VortexFreezing {
+    public func pageoutCounters() async -> PageoutCounters? { nil }
 }
 
 extension VortexActor: VortexFreezing {}
