@@ -16,6 +16,7 @@ let package = Package(
         .executable(name: "froggy", targets: ["FroggyCLI"]),
         .library(name: "VortexCore", targets: ["VortexCore"]),
         .library(name: "LushaBridge", targets: ["LushaBridge"]),
+        .library(name: "LushaExperimental", targets: ["LushaExperimental"]),
         .library(name: "MLXWorkerProtocol", targets: ["MLXWorkerProtocol"]),
     ],
     dependencies: [
@@ -25,7 +26,7 @@ let package = Package(
     targets: [
         .executableTarget(
             name: "FroggyDaemon",
-            dependencies: ["VortexCore", "LushaBridge"],
+            dependencies: ["VortexCore", "LushaBridge", "LushaExperimental"],
             swiftSettings: strictConcurrency
         ),
         .executableTarget(
@@ -87,6 +88,15 @@ let package = Package(
             dependencies: [],
             swiftSettings: strictConcurrency
         ),
+        // Experimental accessors живут отдельно, чтобы добавление нового
+        // опытного датчика не требовало правки `FroggyDaemon/main.swift`
+        // (ADR 0011 § EXP-1). Регистрируется через `AccessorRegistrar`
+        // — main подключает регистратор одной строкой.
+        .target(
+            name: "LushaExperimental",
+            dependencies: ["LushaBridge"],
+            swiftSettings: strictConcurrency
+        ),
         .testTarget(
             name: "VortexCoreTests",
             dependencies: ["VortexCore"],
@@ -95,6 +105,11 @@ let package = Package(
         .testTarget(
             name: "LushaBridgeTests",
             dependencies: ["LushaBridge"],
+            swiftSettings: strictConcurrency
+        ),
+        .testTarget(
+            name: "LushaExperimentalTests",
+            dependencies: ["LushaExperimental", "LushaBridge"],
             swiftSettings: strictConcurrency
         ),
         // Verify default.metallib is bundled with FroggyMLXWorker — иначе
