@@ -107,7 +107,6 @@ frontmost-приложений. Делается пользователем по
   а не на всём кадре.
 * Downscale в `SCStream` на стороне ядра (не в нашем CIContext).
 * Electron soft-suspend через `AppleEventDescriptor` (без SIGSTOP).
-* File cache flush через `purgeable` API.
 * Child-process для OCR (отдельный crash-domain как Mem-3 для MLX).
 * Persona-router (несколько LLM с разными промтами/моделями).
 * Voice (Whisper + TTS, OpenAI Realtime).
@@ -265,6 +264,103 @@ honest-stop паттерн, что и для memory/power baseline.
 
 Заблокирован до AD-1 / FCP-1 / EXP-1 в main (Уровень 1.5). Идёт
 параллельно Power-1 / Уровню 2 — порядок по приоритетам.
+
+## Mem-purgable-1 — purgable VM для own evictable caches (заблокирован до Уровня 1.5 в main)
+
+Сейчас все наши allocations (`ContextStore` window snapshots,
+`FrameDigest` history, Vision frame staging buffers, OCR result cache
+если появится) — обычная anonymous-память. Под memory pressure'ом
+kernel пишет их в compressor / swapfile вместе с остальными dirty
+страницами. Это **избыточно**: для recoverable cache'й нам не нужен
+round-trip через swap — мы пересчитаем содержимое при следующем
+обращении.
+
+`mach_vm_purgable_control(VM_PURGABLE_VOLATILE)` / Darwin-flavor
+`madvise(MADV_FREE_REUSABLE)` дают точно то что нужно: помечаем регион
+«можно дискардить без записи в swap», kernel под pressure'ом просто
+zero-fill'ит страницы. Это **сильнее** PageoutChain'а для своих
+данных — нет swap I/O вообще, нет SSD-износа, нет compressor-cycles.
+Этот пункт **поглощает** ранее существовавший Уровень-2 entry «File
+cache flush через `purgeable` API».
+
+### Что добавить
+
+* `PurgableBuffer<T>` actor / wrapper над VM-регионом с явным
+  lifecycle:
+  - `markVolatile()` → `mach_vm_purgable_control(VM_PURGABLE_VOLATILE)`.
+  - `markNonVolatile() throws -> WasReclaimed` →
+    `mach_vm_purgable_control(VM_PURGABLE_NONVOLATILE)`, проверка
+    `state == VM_PURGABLE_EMPTY` (kernel дискардил регион).
+  - `recompute` callback — что сделать если регион reclaim'нут.
+    Обязательно фиксируется при создании буфера.
+* Применить:
+  - `LushaBridge/ContextStore` — sliding window snapshots помечать
+    volatile между запросами; `recompute` = «нет данных, отдадим
+    пустой блок».
+  - `LushaBridge/FrameDigest` — history массив 32×32 fingerprint'ов
+    помечать volatile; `recompute` = «считать дольше = wider similarity
+    window после reclaim'а» (graceful degradation).
+  - Vision frame staging buffers (если есть own staging вне Apple
+    CVPixelBuffer pool'а) — `MADV_FREE_REUSABLE` между cycles.
+* IPC `purgableStats` — кол-во reclaim-events за последний час, по
+  типу буфера. Для honest validation эффекта.
+* `NSCache`-альтернатива поверх purgable там, где это fits
+  (key-value, не raw VM). NSCache внутри использует purgable +
+  memory pressure subscription — меньше своего кода.
+* ADR-XXXX — purgable VM architecture: где использовать, где **нельзя**
+  (state buffers `MLXSupervisor`, `FrozenPidsStore`, `FreezeStatsStore`
+  SQLite — non-volatile).
+
+### Что переиспользуется
+
+* `MemoryPressureMonitor` — не меняется, purgable работает автономно
+  (kernel-driven, не наш code path).
+* IPC/MenuBar — добавить `purgableStats` команду + панель «reclaims/h
+  by buffer type».
+
+### Honest caveats — обязательная часть ADR
+
+* **Не drop-in replacement обычной памяти.** Каждый read-of-volatile
+  требует `markNonVolatile() → check state → if empty: recompute`. Это
+  +код и +cognitive load на каждом call-site. Применять только где
+  recompute разумный (cache, snapshots), **не** для state.
+* **Bug class «used-after-reclaim».** Если забыли `markNonVolatile()`
+  перед чтением — undefined behavior. Тип-системой Swift полностью не
+  закрыть; нужны runtime asserts + тесты на artificially-pressure'd
+  scenarios.
+* **Granularity.** `mach_vm_purgable_control` работает на VM-region,
+  не per-byte. Минимальный размер ~1 page (16 KB ARM64). Маленькие
+  cache'и (десятки байт) — не подходят, overhead > savings.
+* **Win при низком pressure'е стремится к нулю.** На 16+ GB Mac'е без
+  давления kernel держит volatile регионы как обычные — никакого
+  reclaim'а, и тогда purgable-обвес — мёртвый код. Это
+  **substrate-feature для 8 GB**, не universal optimization. ADR
+  должен это явно зафиксировать.
+* **Тесты artificially-pressure'd обязательны.** Нужны xctest'ы
+  умеющие провоцировать reclaim — комбинация `scratch` стратегии
+  PageoutChain'а + `FakeMemoryPressureSource(.critical)` + проверка
+  что reclaim случился. Без таких тестов мы не знаем, работает ли оно
+  вообще.
+
+### Validation gate
+
+Прежде чем имплементировать — снять `bench/purgable-baseline.json`:
+
+* Сколько MB занимают `ContextStore` window + `FrameDigest` history
+  + frame staging в типичной сессии.
+* Под under-pressure scenario из ADR-0011 — сколько из этого ушло в
+  compressor / swapfile **без** purgable (по `proc_pid_rusage` deltas).
+* Сколько ушло бы в purgable-mode (моделируется через ручной
+  `markVolatile` всех кандидатов + наблюдение reclaim-event'ов).
+
+Если потенциальный saving < 50 MB на типичный 8 GB сценарий —
+**остановиться**, документировать null result, не имплементировать.
+Тот же honest-stop, что и для memory / power / jetsam baseline.
+
+### Не сейчас
+
+Заблокирован до AD-1 / FCP-1 / EXP-1 в main (Уровень 1.5). Идёт
+параллельно Power-1 / Obs-1 / Уровню 2 — порядок по приоритетам.
 
 ## Зерна из external review (Grok, 2026-05-07)
 
