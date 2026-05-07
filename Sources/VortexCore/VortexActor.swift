@@ -28,14 +28,18 @@ public actor VortexActor {
     private let classifier: ProcessClassifier
     private let pidStore: FrozenPidsStore?
     private let pageout: PageoutChain?
+    /// Mem-5: телеметрия freeze/thaw. nil — телеметрия выключена.
+    private let ranker: FreezeRanker?
     private var suspendedPids: Set<Int32> = []
 
     public init(classifier: ProcessClassifier = ProcessClassifier(),
                 pidStore: FrozenPidsStore? = nil,
-                pageout: PageoutChain? = nil) {
+                pageout: PageoutChain? = nil,
+                ranker: FreezeRanker? = nil) {
         self.classifier = classifier
         self.pidStore = pidStore
         self.pageout = pageout
+        self.ranker = ranker
     }
 
     // MARK: - Memory pressure
@@ -92,10 +96,12 @@ public actor VortexActor {
 
         // Принудительный pageout: SIGSTOP сам по себе оставляет dirty pages
         // резидентными. Если pageout не сработал — лог-варн, не fail freeze.
+        var strategyTag: String?
         if let pageout {
             let outcome = await pageout.pageout(pid: pid)
             switch outcome {
             case .success(let used):
+                strategyTag = used.rawValue
                 Self.log.info("pageout pid=\(pid) ok via \(used.rawValue, privacy: .public)")
             case .skipped(let reason):
                 Self.log.info("pageout pid=\(pid) skipped: \(reason, privacy: .public)")
@@ -103,7 +109,25 @@ public actor VortexActor {
                 Self.log.warning("pageout pid=\(pid) failed: \(reason, privacy: .public)")
             }
         }
+        // Mem-5 телеметрия: bundle-id берём из executablePath (последний
+        // компонент `.app/Contents/MacOS/<exec>` → имя `.app`).
+        if let ranker {
+            let bundle = Self.bundleId(fromExecutablePath: executablePath)
+            await ranker.recordFreeze(pid: pid, bundleId: bundle, pageoutStrategy: strategyTag)
+        }
         return pid
+    }
+
+    /// Вытаскиваем имя приложения как bundle-id из пути executable'a:
+    /// `/Applications/Slack.app/Contents/MacOS/Slack` → `Slack.app`.
+    /// Это «псевдо-bundle-id» для телеметрии — настоящий
+    /// `CFBundleIdentifier` потребовал бы парсинг Info.plist.
+    nonisolated private static func bundleId(fromExecutablePath path: String) -> String {
+        let parts = path.components(separatedBy: "/")
+        for part in parts.reversed() where part.hasSuffix(".app") {
+            return part
+        }
+        return path
     }
 
     /// Размораживает процесс (`SIGCONT`). Идемпотентно по pidStore.
@@ -115,6 +139,12 @@ public actor VortexActor {
             Self.log.warning("thaw pid=\(pid) returned errno=\(errno)")
         } else {
             Self.log.info("resumed pid=\(pid)")
+        }
+        if let ranker {
+            // Bundle-id мы при freeze не сохраняли; ranker.recordThaw
+            // принимает хотя бы pid — без bundle статистика recovery всё
+            // равно полезна.
+            await ranker.recordThaw(pid: pid, bundleId: "<unknown>")
         }
     }
 

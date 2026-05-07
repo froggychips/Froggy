@@ -61,7 +61,12 @@ let package = Package(
         .target(
             name: "VortexCore",
             dependencies: ["MLXWorkerProtocol"],
-            swiftSettings: strictConcurrency
+            swiftSettings: strictConcurrency,
+            linkerSettings: [
+                // sqlite3 для FreezeStatsStore — Mem-5 telemetry. macOS его
+                // ships в системе, без новых SwiftPM deps.
+                .linkedLibrary("sqlite3"),
+            ]
         ),
         .target(
             name: "LushaBridge",

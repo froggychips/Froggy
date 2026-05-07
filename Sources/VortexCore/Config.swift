@@ -32,6 +32,11 @@ public struct FroggyConfig: Codable, Sendable, Equatable {
     /// См. ADR 0008.
     public var mlxWorkerPath: String?
 
+    /// Mem-5 этап 1: собирать ли телеметрию freeze/thaw в SQLite.
+    /// На этапе 1 мы только пишем; ranking-overlay пойдёт отдельным PR'ом.
+    /// См. ADR 0010.
+    public var freezeRankingEnabled: Bool
+
     public var ipcSocketPath: String
     public var frameSimilarityThreshold: Double
     public var contextWindowSize: Int
@@ -54,6 +59,7 @@ public struct FroggyConfig: Codable, Sendable, Equatable {
         pageoutStrategy: PageoutStrategy = .jetsam,
         pageoutScratchMB: Int = 256,
         mlxWorkerPath: String? = nil,
+        freezeRankingEnabled: Bool = false,
         ipcSocketPath: String = FroggyConfig.defaultSocketPath,
         frameSimilarityThreshold: Double = 0.98,
         contextWindowSize: Int = 30,
@@ -71,6 +77,7 @@ public struct FroggyConfig: Codable, Sendable, Equatable {
         self.pageoutStrategy = pageoutStrategy
         self.pageoutScratchMB = pageoutScratchMB
         self.mlxWorkerPath = mlxWorkerPath
+        self.freezeRankingEnabled = freezeRankingEnabled
         self.ipcSocketPath = ipcSocketPath
         self.frameSimilarityThreshold = frameSimilarityThreshold
         self.contextWindowSize = contextWindowSize
@@ -128,6 +135,7 @@ public struct FroggyConfig: Codable, Sendable, Equatable {
         self.pressureCooldownSeconds = try c.decodeIfPresent(Int.self, forKey: .pressureCooldownSeconds) ?? d.pressureCooldownSeconds
         self.pageoutStrategy = try c.decodeIfPresent(PageoutStrategy.self, forKey: .pageoutStrategy) ?? d.pageoutStrategy
         self.pageoutScratchMB = try c.decodeIfPresent(Int.self, forKey: .pageoutScratchMB) ?? d.pageoutScratchMB
+        self.freezeRankingEnabled = try c.decodeIfPresent(Bool.self, forKey: .freezeRankingEnabled) ?? d.freezeRankingEnabled
         self.mlxWorkerPath = try c.decodeIfPresent(String.self, forKey: .mlxWorkerPath)
 
         self.ipcSocketPath = try c.decodeIfPresent(String.self, forKey: .ipcSocketPath) ?? d.ipcSocketPath

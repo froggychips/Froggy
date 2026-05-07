@@ -39,7 +39,27 @@ struct FroggyDaemon {
             jetsam: JetsamPageoutImpl(),
             scratch: ScratchPageoutImpl(scratchMB: config.pageoutScratchMB)
         )
-        let vortex = VortexActor(pidStore: pidStore, pageout: pageoutChain)
+        // Mem-5: телеметрия freeze (этап 1 — только сбор; overlay позже).
+        let freezeStats: FreezeStatsStore?
+        let ranker: FreezeRanker?
+        if config.freezeRankingEnabled {
+            let store = FreezeStatsStore()
+            do {
+                try await store.openAndMigrate()
+                freezeStats = store
+                ranker = FreezeRanker(store: store)
+                log.notice("freeze ranking telemetry enabled")
+            } catch {
+                log.warning("freeze ranking init failed: \(error.localizedDescription, privacy: .public)")
+                freezeStats = nil
+                ranker = nil
+            }
+        } else {
+            freezeStats = nil
+            ranker = nil
+        }
+        _ = freezeStats // ipc-handler ссылается отдельно
+        let vortex = VortexActor(pidStore: pidStore, pageout: pageoutChain, ranker: ranker)
         let workerURL = config.mlxWorkerPath.map { URL(fileURLWithPath: $0) }
         let mlx = MLXSupervisor(
             memoryLimitBytes: config.gpuMemoryLimitBytes,
@@ -98,6 +118,7 @@ struct FroggyDaemon {
             contextStore: contextStore,
             registry: registry,
             augmenter: PromptAugmenter(maxContextChars: config.contextMaxChars),
+            freezeStats: freezeStats,
             defaultContextChars: config.contextMaxChars
         )
         let ipc = IPCServer(socketPath: config.ipcSocketPath, handler: handler)
@@ -167,6 +188,7 @@ struct DaemonIPCHandler: IPCRequestHandler, Sendable {
     let contextStore: ContextStore
     let registry: AccessorRegistry
     let augmenter: PromptAugmenter
+    let freezeStats: FreezeStatsStore?
     let defaultContextChars: Int
 
     /// Если useContext == true, оборачиваем prompt в шаблон с свежим контекстом.
@@ -288,6 +310,22 @@ struct DaemonIPCHandler: IPCRequestHandler, Sendable {
             r.pageoutCounters = snap.pageoutCounters
             r.final = true
             return r
+
+        case "freezeStats":
+            guard let store = freezeStats else {
+                return .failure("freeze ranking telemetry disabled (config.freezeRankingEnabled=false)")
+            }
+            do {
+                let limit = request.maxTokens ?? 10 // переиспользуем поле как «top N»
+                let stats = try await store.topByMedianFreed(limit: limit, daysBack: 7)
+                var r = IPCResponse()
+                r.ok = true
+                r.freezeStats = stats
+                r.final = true
+                return r
+            } catch {
+                return .failure(String(describing: error))
+            }
 
         default:
             return .failure("unknown cmd: \(request.cmd)")
