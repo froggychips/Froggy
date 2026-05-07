@@ -53,6 +53,10 @@ public struct IPCResponse: Codable, Sendable {
     public var tier2Frozen: [Int32]?
     /// Сколько секунд держится текущий уровень.
     public var secondsInLevel: Int?
+    /// Кумулятивные счётчики pageout (attempted/succeeded/failed по стратегиям) —
+    /// observability для cmd `pressure`. Без них непонятно, реально ли работает
+    /// jetsam/machVM на конкретной машине.
+    public var pageoutCounters: PageoutCounters?
     /// Маркер «это последний chunk в стриме». Для one-shot ответов — true.
     /// Для streaming-промежуточных chunk'ов — false.
     public var final: Bool?

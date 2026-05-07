@@ -133,4 +133,9 @@ public actor VortexActor {
     }
 
     public func suspendedCount() -> Int { suspendedPids.count }
+
+    /// Реализация требования `VortexFreezing`: проксирует на `PageoutChain`.
+    public func pageoutCounters() async -> PageoutCounters? {
+        await pageout?.currentCounters()
+    }
 }
