@@ -26,3 +26,4 @@ Format: short — Status / Context / Decision / Consequences / Alternatives.
 * [0012 — Signing-constraints (honest doc)](0012-signing-constraints-honest-doc.md)
 * [0013 — Metallib missing in SwiftPM release build](0013-metallib-missing-in-swiftpm-release.md)
 * [0014 — Design-doc'и не гонятся вперёд имплементации](0014-design-docs-after-implementation.md)
+* [0015 — Frontmost-veto, minimal scope (NSWorkspace only)](0015-frontmost-veto-minimal.md)

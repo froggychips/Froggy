@@ -16,6 +16,17 @@ public enum WorkspaceEvent: Sendable, Equatable {
     /// **Критично** для cleanup `FrozenPidsStore`: если frozen pid убили
     /// извне, он должен быть удалён из persisted store.
     case appTerminated(pid: Int32, bundleId: String?)
+    /// Сменился frontmost-app (переключение фокуса между приложениями).
+    /// Эмитится из `NSWorkspace.didActivateApplicationNotification`
+    /// **дополнительно** к `appActivated` — это две разные семантики:
+    /// `.appActivated` имеет «launch-or-activate» интерпретацию (нужен
+    /// reactive-finder'у, чтобы увидеть новый pid), `.frontmostChanged`
+    /// — это строго «теперь фокус у этого pid». Coordinator использует
+    /// последний для frontmost-veto (ADR 0015).
+    /// `pid == nil` — momentary state «фокуса нет ни у кого» (например,
+    /// при logout / lock-screen). Сейчас RealWorkspaceEventSource не
+    /// эмитит nil — оставлено для будущего расширения.
+    case frontmostChanged(pid: Int32?, bundleId: String?)
     /// `NSWorkspace.willSleepNotification` — система собирается спать.
     /// Перед этим событием полезно отпустить freeze'ы: после wake
     /// замороженные pids могут отвалиться по watchdog'ам.
@@ -34,6 +45,13 @@ public protocol WorkspaceEventSource: Sendable {
     /// Текущий снимок «кто сейчас бежит», для seed'а reactive-finder'а.
     /// Возвращает `[(pid, bundleId)]` (bundleId может быть nil).
     func runningApplications() async -> [(Int32, String?)]
+    /// Текущий frontmost pid в момент seed'а (на старте `VortexCoordinator`).
+    /// Без этого первый `.frontmostChanged` event приходит только когда
+    /// пользователь руками переключит фокус — между запуском demon'а и
+    /// первым переключением мы бы не знали кого veto'ить.
+    /// Может вернуть nil, если frontmost-app в этот момент не определена
+    /// (редкий race, но теоретически возможен на login window).
+    func initialFrontmostPid() async -> Int32?
     func events() -> AsyncStream<WorkspaceEvent>
 }
 
@@ -58,7 +76,7 @@ public final class RealWorkspaceEventSource: WorkspaceEventSource, @unchecked Se
             forName: NSWorkspace.didLaunchApplicationNotification,
             object: nil, queue: nil
         ) { [weak self] note in
-            self?.handleAppNote(note, kind: .activated)
+            self?.handleAppNote(note, kind: .launched)
         })
         observers.append(nc.addObserver(
             forName: NSWorkspace.didActivateApplicationNotification,
@@ -119,6 +137,12 @@ public final class RealWorkspaceEventSource: WorkspaceEventSource, @unchecked Se
         }
     }
 
+    public func initialFrontmostPid() async -> Int32? {
+        await MainActor.run {
+            NSWorkspace.shared.frontmostApplication?.processIdentifier
+        }
+    }
+
     public func events() -> AsyncStream<WorkspaceEvent> {
         AsyncStream { cont in
             let id = UUID()
@@ -133,7 +157,7 @@ public final class RealWorkspaceEventSource: WorkspaceEventSource, @unchecked Se
         }
     }
 
-    private enum AppKind { case activated, deactivated, terminated }
+    private enum AppKind { case launched, activated, deactivated, terminated }
 
     private func handleAppNote(_ note: Notification, kind: AppKind) {
         guard let app = note.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication else {
@@ -141,13 +165,23 @@ public final class RealWorkspaceEventSource: WorkspaceEventSource, @unchecked Se
         }
         let pid = app.processIdentifier
         let bundleId = app.bundleIdentifier
-        let event: WorkspaceEvent
         switch kind {
-        case .activated:    event = .appActivated(pid: pid, bundleId: bundleId)
-        case .deactivated:  event = .appDeactivated(pid: pid, bundleId: bundleId)
-        case .terminated:   event = .appTerminated(pid: pid, bundleId: bundleId)
+        case .launched:
+            // Launch — это и «появился pid» (нужно reactive-finder'у), но не
+            // обязательно «получил фокус». Эмитим только `.appActivated`
+            // (legacy-семантика launch-or-activate), без `.frontmostChanged`.
+            broadcast(.appActivated(pid: pid, bundleId: bundleId))
+        case .activated:
+            // Activate — двойная семантика. Эмитим оба события:
+            // `.appActivated` для reactive-finder'a (он ожидает увидеть pid
+            // на любом активе), `.frontmostChanged` для frontmost-veto.
+            broadcast(.appActivated(pid: pid, bundleId: bundleId))
+            broadcast(.frontmostChanged(pid: pid, bundleId: bundleId))
+        case .deactivated:
+            broadcast(.appDeactivated(pid: pid, bundleId: bundleId))
+        case .terminated:
+            broadcast(.appTerminated(pid: pid, bundleId: bundleId))
         }
-        broadcast(event)
     }
 
     private func broadcast(_ event: WorkspaceEvent) {
@@ -164,9 +198,11 @@ public final class FakeWorkspaceEventSource: WorkspaceEventSource, @unchecked Se
     private let lock = NSLock()
     private var continuations: [UUID: AsyncStream<WorkspaceEvent>.Continuation] = [:]
     private var seed: [(Int32, String?)] = []
+    private var frontmostSeed: Int32?
 
-    public init(seed: [(Int32, String?)] = []) {
+    public init(seed: [(Int32, String?)] = [], frontmostPid: Int32? = nil) {
         self.seed = seed
+        self.frontmostSeed = frontmostPid
     }
 
     public func setSeed(_ apps: [(Int32, String?)]) {
@@ -174,8 +210,17 @@ public final class FakeWorkspaceEventSource: WorkspaceEventSource, @unchecked Se
         seed = apps
     }
 
+    public func setFrontmostSeed(_ pid: Int32?) {
+        lock.lock(); defer { lock.unlock() }
+        frontmostSeed = pid
+    }
+
     public func runningApplications() async -> [(Int32, String?)] {
         lock.withLock { seed }
+    }
+
+    public func initialFrontmostPid() async -> Int32? {
+        lock.withLock { frontmostSeed }
     }
 
     public func events() -> AsyncStream<WorkspaceEvent> {
