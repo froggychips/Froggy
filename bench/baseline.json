@@ -1,0 +1,63 @@
+[
+  {
+    "schema_version": 1,
+    "captured_at": "2026-05-07T10:25:24Z",
+    "scenario": "under-pressure",
+    "daemon_rss_kb": 195488,
+    "worker_rss_kb": null,
+    "ttft_ms": null,
+    "vm_stat_raw": "Mach Virtual Memory Statistics: (page size of 16384 bytes)\nPages free:                                3838.\nPages active:                            103328.\nPages inactive:                           99570.\nPages speculative:                         2429.\nPages throttled:                              0.\nPages wired down:                        133280.\nPages purgeable:                           3192.\n\"Translation faults\":                7373986968.\nPages copy-on-write:                   95392473.\nPages zero filled:                   1245988448.\nPages reactivated:                   3253390971.\nPages purged:                         291756849.\nFile-backed pages:                        48301.\nAnonymous pages:                         157026.\nPages stored in compressor:             1182767.\nPages occupied by compressor:            144417.\nDecompressions:                      3440540093.\nCompressions:                        4046141311.\nPageins:                              241750290.\nPageouts:                               3292506.\nSwapins:                               65325297.\nSwapouts:                              70568125.",
+    "memory_pressure_raw": "The system has 8589934592 (524288 pages with a page size of 16384).\n\nStats: \nPages free: 3560 \nPages purgeable: 3194 \nPages purged: 291756849 \n\nSwap I/O:\nSwapins: 65325297 \nSwapouts: 70568125 \n\nPage Q counts:\nPages active: 103562 \nPages inactive: 99727 \nPages speculative: 2437 \nPages throttled: 0 \nPages wired down: 133291 \n\nCompressor Stats:\nPages used by compressor: 144332 \nPages decompressed: 3440540395 \nPages compressed: 4046141311 \n\nFile I/O:\nPageins: 241750292 \nPageouts: 3292506 \n\nSystem-wide memory free percentage: 42%",
+    "froggy_status": "null",
+    "froggy_pressure": "{\"secondsInLevel\":97,\"tier2Frozen\":[],\"final\":true,\"ok\":true,\"pageoutCounters\":{\"jetsamAttempted\":1,\"scratchSucceeded\":1,\"scratchFailed\":0,\"machVMAttempted\":0,\"machVMSucceeded\":0,\"jetsamSucceeded\":0,\"jetsamFailed\":1,\"scratchAttempted\":1,\"machVMFailed\":0},\"tier1Frozen\":[79015],\"pressureLevel\":\"critical\"}"
+  },
+  {
+    "schema_version": 1,
+    "captured_at": "2026-05-07T10:59:07Z",
+    "scenario": "under-pressure",
+    "daemon_rss_kb": 42848,
+    "worker_rss_kb": null,
+    "ttft_ms": null,
+    "vm_stat_raw": "Mach Virtual Memory Statistics: (page size of 16384 bytes)\nPages free:                                4243.\nPages active:                             86799.\nPages inactive:                           83456.\nPages speculative:                         2589.\nPages throttled:                              0.\nPages wired down:                        147922.\nPages purgeable:                              2.\n\"Translation faults\":                7411205409.\nPages copy-on-write:                   95671794.\nPages zero filled:                   1249089721.\nPages reactivated:                   3276819377.\nPages purged:                         293853598.\nFile-backed pages:                        61529.\nAnonymous pages:                         111315.\nPages stored in compressor:             1225997.\nPages occupied by compressor:            161978.\nDecompressions:                      3462149333.\nCompressions:                        4069183411.\nPageins:                              242875434.\nPageouts:                               3309509.\nSwapins:                               65467728.\nSwapouts:                              70730285.",
+    "memory_pressure_raw": "The system has 8589934592 (524288 pages with a page size of 16384).\n\nStats: \nPages free: 4070 \nPages purgeable: 2 \nPages purged: 293853598 \n\nSwap I/O:\nSwapins: 65467728 \nSwapouts: 70730285 \n\nPage Q counts:\nPages active: 86760 \nPages inactive: 83566 \nPages speculative: 2605 \nPages throttled: 0 \nPages wired down: 147931 \n\nCompressor Stats:\nPages used by compressor: 161923 \nPages decompressed: 3462149335 \nPages compressed: 4069183411 \n\nFile I/O:\nPageins: 242875443 \nPageouts: 3309509 \n\nSystem-wide memory free percentage: 36%",
+    "froggy_status": "null",
+    "froggy_pressure": "{\"ok\":true,\"pressureLevel\":\"critical\",\"pageoutCounters\":{\"machVMAttempted\":0,\"scratchAttempted\":1,\"jetsamAttempted\":1,\"scratchSucceeded\":1,\"jetsamSucceeded\":0,\"machVMSucceeded\":0,\"machVMFailed\":0,\"jetsamFailed\":1,\"scratchFailed\":0},\"tier1Frozen\":[79015],\"secondsInLevel\":413,\"tier2Frozen\":[],\"final\":true}"
+  },
+  {
+    "schema_version": 2,
+    "captured_at": "2026-05-07T11:28:37Z",
+    "scenario": "idle",
+    "daemon_rss_kb": 119936,
+    "daemon_rss_kb_distribution": {
+      "min": 29696,
+      "median": 119936,
+      "max": 140112,
+      "mean": 89368,
+      "samples": [
+        50960,
+        53888,
+        54816,
+        57456,
+        29696,
+        133536,
+        140112,
+        119936,
+        126720,
+        126560
+      ]
+    },
+    "worker_rss_kb": null,
+    "worker_rss_kb_distribution": {
+      "min": null,
+      "median": null,
+      "max": null,
+      "mean": null,
+      "samples": []
+    },
+    "ttft_ms": null,
+    "vm_stat_raw": "Mach Virtual Memory Statistics: (page size of 16384 bytes)\nPages free:                                3868.\nPages active:                             76564.\nPages inactive:                           69726.\nPages speculative:                         6165.\nPages throttled:                              0.\nPages wired down:                        144129.\nPages purgeable:                              2.\n\"Translation faults\":                7450688751.\nPages copy-on-write:                   95909260.\nPages zero filled:                   1253326911.\nPages reactivated:                   3297817831.\nPages purged:                         296279484.\nFile-backed pages:                        55873.\nAnonymous pages:                          96582.\nPages stored in compressor:             1200160.\nPages occupied by compressor:            186606.\nDecompressions:                      3484563508.\nCompressions:                        4093311854.\nPageins:                              244794160.\nPageouts:                               3327908.\nSwapins:                               65763480.\nSwapouts:                              71020695.",
+    "memory_pressure_raw": "The system has 8589934592 (524288 pages with a page size of 16384).\n\nStats: \nPages free: 4030 \nPages purgeable: 0 \nPages purged: 296279486 \n\nSwap I/O:\nSwapins: 65763480 \nSwapouts: 71020695 \n\nPage Q counts:\nPages active: 76385 \nPages inactive: 70012 \nPages speculative: 5648 \nPages throttled: 0 \nPages wired down: 144138 \n\nCompressor Stats:\nPages used by compressor: 186587 \nPages decompressed: 3484563541 \nPages compressed: 4093311854 \n\nFile I/O:\nPageins: 244794163 \nPageouts: 3327908 \n\nSystem-wide memory free percentage: 31%",
+    "froggy_status": "null",
+    "froggy_pressure": "{\"pageoutCounters\":{\"scratchSucceeded\":0,\"machVMFailed\":0,\"jetsamAttempted\":0,\"machVMSucceeded\":0,\"jetsamFailed\":0,\"machVMAttempted\":0,\"scratchFailed\":0,\"scratchAttempted\":0,\"jetsamSucceeded\":0},\"pressureLevel\":\"normal\",\"ok\":true,\"tier1Frozen\":[],\"tier2Frozen\":[],\"secondsInLevel\":15,\"final\":true}"
+  }
+]
