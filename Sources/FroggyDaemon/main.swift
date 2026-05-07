@@ -72,14 +72,29 @@ struct FroggyDaemon {
             source: pressureSource,
             cooldownSeconds: TimeInterval(config.pressureCooldownSeconds)
         )
+        // Reactive workspace events: один источник на координатор, finder и
+        // termination-watcher — экономит подписки и держит state-карту в
+        // одном месте.
+        let workspaceSource: any WorkspaceEventSource = RealWorkspaceEventSource()
+        let reactiveFinder = ReactiveProcessFinder(source: workspaceSource)
+        await reactiveFinder.start()
         let coordinator = VortexCoordinator(
             mlx: mlx,
             vortex: vortex,
             monitor: monitor,
             tier1BundleIds: config.freezeTier1BundleIds,
-            tier2BundleIds: config.freezeTier2BundleIds
+            tier2BundleIds: config.freezeTier2BundleIds,
+            finder: reactiveFinder,
+            workspaceSource: workspaceSource
         )
         await coordinator.startMonitoring()
+        // Termination-watcher: чистит FrozenPidsStore при внешнем kill'е.
+        let terminationWatcher = WorkspaceTerminationWatcher(
+            source: workspaceSource,
+            pidStore: pidStore,
+            sink: coordinator
+        )
+        await terminationWatcher.start()
         let scorer: any SimilarityScorer = config.contextDedupEnabled
             ? JaccardSimilarityScorer()
             : NoopSimilarityScorer()
@@ -130,6 +145,32 @@ struct FroggyDaemon {
         }
 
         let captureTask = Task { await vision.startCapture() }
+
+        // Screen sleep/wake gating для SCStream: пока экран спит, capture
+        // тратит CPU на чёрные кадры. На screensDidSleep — vision.stopCapture()
+        // (loop кооперативно завершится; ScreenStream остановится в defer'е),
+        // на screensDidWake — перезапускаем capture loop.
+        let screenGateStream = workspaceSource.events()
+        let visionRef = vision
+        let screenGateTask = Task {
+            var captureLoop: Task<Void, Never>? = captureTask
+            for await event in screenGateStream {
+                switch event {
+                case .screensDidSleep:
+                    log.notice("screens did sleep — pausing capture")
+                    await visionRef.stopCapture()
+                    captureLoop?.cancel()
+                    captureLoop = nil
+                case .screensDidWake:
+                    log.notice("screens did wake — resuming capture")
+                    if captureLoop == nil {
+                        captureLoop = Task { await visionRef.startCapture() }
+                    }
+                default:
+                    break
+                }
+            }
+        }
         log.info("🚀 systems online; ipc=\(config.ipcSocketPath, privacy: .public)")
 
         while !Task.isCancelled {
@@ -143,6 +184,9 @@ struct FroggyDaemon {
         }
 
         captureTask.cancel()
+        screenGateTask.cancel()
+        await terminationWatcher.stop()
+        await reactiveFinder.stop()
         await coordinator.emergencyThaw()
         await ipc.stop()
     }
