@@ -204,6 +204,13 @@ file.
 See [`packaging/README.md`](packaging/README.md) — codesign + notarytool +
 `launchctl bootstrap`. Outside of CI: requires an Apple Developer ID.
 
+## Troubleshooting
+
+`make logbundle` collects a unified-log archive filtered by
+`subsystem == "com.froggychips.froggy"` into `./froggy.logarchive`,
+suitable for attaching to bug reports. Pass `--last 1h` (or similar)
+via `scripts/logbundle.sh` directly to limit the time range.
+
 ## Documentation
 
 The [`docs/adr/`](docs/adr/) directory captures the project's
