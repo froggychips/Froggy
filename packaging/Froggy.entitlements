@@ -27,18 +27,22 @@
     <key>com.apple.security.files.user-selected.read-write</key>
     <false/>
 
-    <!-- Pageout стратегия `machVM` (см. ADR 0007) использует `task_for_pid` +
-         `mach_vm_behavior_set(VM_BEHAVIOR_PAGEOUT)` для прямого
-         выталкивания страниц замороженных процессов в compressor. Без
-         этого entitlement'а `task_for_pid` возвращает KERN_FAILURE и
-         PageoutChain автоматически откатывается на `jetsam`/`scratch`.
+    <!-- ВНИМАНИЕ: для pageout-стратегии `machVM` (см. ADR 0007) нужен
+         `com.apple.developer.task-for-pid-allow` в provisioning profile,
+         выпущенном Apple специально для этого приложения. Это право
+         НЕ активируется ни простой dev-подписью, ни Developer ID +
+         notarization. Apple выдаёт его в основном собственным
+         отладочным утилитам и платформенным партнёрам — третьим
+         сторонам обычно отказывает.
 
-         ВАЖНО: для активации `task_for_pid-allow` нужна Apple Developer ID
-         подпись + provisioning profile с правом — простая dev-подпись
-         его НЕ активирует. Если у вас нет Developer ID, оставьте
-         pageoutStrategy=jetsam (default), и pageout будет работать без
-         этого entitlement'а. -->
-    <key>com.apple.security.cs.debugger</key>
-    <true/>
+         `com.apple.security.cs.debugger` (hardened runtime) — это НЕ
+         то же самое: он позволяет attach отладчиком к собственным
+         процессам, но `task_for_pid()` против чужого pid всё равно
+         даст KERN_FAILURE. Прежняя редакция этого файла ошибочно
+         включала `cs.debugger` как замену. Удалено.
+
+         Если у вас нет approved provisioning profile — оставьте
+         `pageoutStrategy=jetsam` (default), и pageout будет работать
+         без entitlement'ов через memorystatus_control. -->
 </dict>
 </plist>

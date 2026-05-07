@@ -1,0 +1,73 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-settings.json",
+  "permissions": {
+    "allow": [
+      "Bash(swift build*)",
+      "Bash(swift test*)",
+      "Bash(swift package*)",
+      "Bash(swift run*)",
+      "Bash(swift --version)",
+      "Bash(git status*)",
+      "Bash(git diff*)",
+      "Bash(git log*)",
+      "Bash(git branch*)",
+      "Bash(git fetch*)",
+      "Bash(git worktree list*)",
+      "Bash(git ls-tree*)",
+      "Bash(gh pr list*)",
+      "Bash(gh pr view*)",
+      "Bash(gh run list*)",
+      "Bash(gh api repos/froggychips/Froggy*)",
+      "Bash(jq *)",
+      "Bash(grep *)",
+      "Bash(rg *)",
+      "Bash(ls *)",
+      "Bash(cat *)",
+      "Bash(head *)",
+      "Bash(tail *)",
+      "Bash(wc *)",
+      "Bash(find . *)",
+      "Bash(ps *)",
+      "Bash(vm_stat*)",
+      "Bash(memory_pressure*)",
+      "Bash(echo *)",
+      "Bash(pwd)"
+    ]
+  },
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Edit|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "jq -r '.tool_input.file_path // .tool_response.filePath // empty' | { read -r f; case \"$f\" in *.swift) command -v swift-format >/dev/null 2>&1 && swift-format format --in-place \"$f\" || echo \"warn: swift-format не установлен (brew install swift-format)\" >&2 ;; esac; } || true"
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "if": "Bash(git commit*)",
+            "command": "cd \"$CLAUDE_PROJECT_DIR\" && swift test --parallel --quiet 2>&1 | tail -5",
+            "timeout": 600
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "cd \"$CLAUDE_PROJECT_DIR\" && git status --short | head -20 || true"
+          }
+        ]
+      }
+    ]
+  }
+}
