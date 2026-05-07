@@ -27,11 +27,41 @@ ts="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 vm_stat_raw="$(vm_stat)"
 mp_raw="$(memory_pressure 2>/dev/null || echo n/a)"
 
-# 2. Pids/RSS
+# 2. Pids/RSS — distribution из 10 сэмплов с интервалом 1s.
+# Single-sample обманчив: под pressure'ом RSS живёт sawtooth'ом 50-150 MB
+# (Vision IOSurface буферы периодически evict'ятся kernel'ом). Нужен min/median/max.
 daemon_pid="$(pgrep FroggyDaemon | head -1 || true)"
 worker_pid="$(pgrep FroggyMLXWorker | head -1 || true)"
-daemon_rss="$( [ -n "$daemon_pid" ] && ps -o rss= -p "$daemon_pid" | tr -d ' ' || echo null)"
-worker_rss="$( [ -n "$worker_pid" ] && ps -o rss= -p "$worker_pid" | tr -d ' ' || echo null)"
+
+sample_rss() {
+  local pid="$1"
+  [ -z "$pid" ] && { echo "null,null,null,null,[]"; return; }
+  python3 - "$pid" <<'PY'
+import subprocess, sys, time, json
+pid = sys.argv[1]
+samples = []
+for _ in range(10):
+    try:
+        out = subprocess.check_output(["ps", "-o", "rss=", "-p", pid], text=True).strip()
+        if out:
+            samples.append(int(out))
+    except subprocess.CalledProcessError:
+        break
+    time.sleep(1)
+if not samples:
+    print("null,null,null,null,[]")
+else:
+    s = sorted(samples)
+    median = s[len(s)//2]
+    print(f"{min(s)},{median},{max(s)},{int(sum(s)/len(s))},{json.dumps(samples)}")
+PY
+}
+
+IFS=',' read -r daemon_rss_min daemon_rss_median daemon_rss_max daemon_rss_mean daemon_rss_samples < <(sample_rss "$daemon_pid")
+IFS=',' read -r worker_rss_min worker_rss_median worker_rss_max worker_rss_mean worker_rss_samples < <(sample_rss "$worker_pid")
+# Backward compat: daemon_rss_kb = median.
+daemon_rss="$daemon_rss_median"
+worker_rss="$worker_rss_median"
 
 # 3. Froggy status / pressure (через CLI; если daemon не запущен — null)
 froggy_status_raw="$($FROGGY_BIN status 2>/dev/null || true)"
@@ -59,11 +89,25 @@ fi
 # 6. Compose JSON snapshot
 snapshot=$(cat <<JSON
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "captured_at": "$ts",
   "scenario": "$scenario",
   "daemon_rss_kb": $daemon_rss,
+  "daemon_rss_kb_distribution": {
+    "min": $daemon_rss_min,
+    "median": $daemon_rss_median,
+    "max": $daemon_rss_max,
+    "mean": $daemon_rss_mean,
+    "samples": $daemon_rss_samples
+  },
   "worker_rss_kb": $worker_rss,
+  "worker_rss_kb_distribution": {
+    "min": $worker_rss_min,
+    "median": $worker_rss_median,
+    "max": $worker_rss_max,
+    "mean": $worker_rss_mean,
+    "samples": $worker_rss_samples
+  },
   "ttft_ms": $ttft_ms,
   "vm_stat_raw": $(printf '%s' "$vm_stat_raw" | python3 -c 'import json,sys; print(json.dumps(sys.stdin.read()))'),
   "memory_pressure_raw": $(printf '%s' "$mp_raw" | python3 -c 'import json,sys; print(json.dumps(sys.stdin.read()))'),

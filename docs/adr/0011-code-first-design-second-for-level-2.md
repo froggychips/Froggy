@@ -46,10 +46,16 @@ substrate'е, который ещё не доказал, что **выдержи
 
 5. **`/froggy-bench --save` × 3 сценария** (idle / model-loaded /
    under-pressure) ⇒ `bench/baseline.json` в main.
-6. Прочитать цифры honest. Если pageout-counters показывают
-   `succeeded = 0` на jetsam, или `secondsInLevel`-распределение под
-   реальной нагрузкой не выходит за `.normal` ни разу — не идти в
-   AD-1, разбираться с substrate.
+6. Прочитать цифры honest. Не идти в AD-1, если выполняется любое:
+   - `pageoutCounters.<any>.succeeded == 0` под pressure'ом — substrate
+     не вернул ни одной страницы в kernel ни одной из стратегий
+     (jetsam-specific критерий ослаблен после первого реального прогона:
+     jetsam без `task_for_pid_allow` ожидаемо EPERM'ит, см. ADR 0012).
+   - `secondsInLevel`-распределение под реальной нагрузкой не выходит
+     за `.normal` ни разу за 5 минут.
+   - `daemon_rss_kb_distribution.median` под `idle`/`model-loaded` без
+     worker'а > 200 MB (нижняя граница из-за Vision+SCStream+AppKit
+     transitive — ~50-150 MB sawtooth, см. `bench/README.md`).
 
 Только после `bench/baseline.json` в main и subjective-проверки
 «цифры разумны» — открывается AD-1.

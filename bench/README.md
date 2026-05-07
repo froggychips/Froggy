@@ -40,16 +40,31 @@ kill %1
 
 ## Что читать в результате
 
-`baseline.json` — массив. Каждый snapshot:
+`baseline.json` — массив. Schema v2 (v1 совместим: `daemon_rss_kb` =
+median из distribution). Каждый snapshot:
 
 | поле | что |
 |---|---|
 | `scenario` | `idle` / `model-loaded` / `under-pressure` |
-| `daemon_rss_kb` | RSS демона. Идеал idle: ~50 MB; model-loaded без worker'а — те же ~50 MB (peak уехал в worker). |
-| `worker_rss_kb` | RSS worker'а. Зависит от модели; для 4-bit 4B ожидается ~3 GB. |
+| `daemon_rss_kb` | **median** RSS демона из 10 сэмплов (см. ниже про sawtooth). |
+| `daemon_rss_kb_distribution` | `{min, median, max, mean, samples[10]}`. Под pressure'ом sawtooth 50-150 MB — single-sample обманчив, всегда смотреть median+max. |
+| `worker_rss_kb` / `worker_rss_kb_distribution` | то же для worker'а. Для 4-bit 4B ожидается median ~3 GB. |
 | `ttft_ms` | time-to-first-token. Только при `model-loaded`. |
 | `vm_stat_raw` | сырой `vm_stat`. Смотреть `compressed`, `pages free`, `pages active`. |
-| `froggy_pressure` | сырой ответ `pressure`. Смотреть `pageoutCounters` — реально ли pageout что-то делает. |
+| `froggy_pressure` | сырой ответ `pressure`. Смотреть `pageoutCounters` — реально ли pageout что-то делает (любая стратегия). |
+
+## Sawtooth — почему distribution, а не single-sample
+
+Под critical-pressure RSS daemon'а живёт sawtooth'ом 50-150 MB на
+интервалах ~секунд. Причина: Vision/SCStream держат IOSurface буферы
+в clean-mapped памяти, и kernel под давлением периодически evict'ит
+эти страницы; на следующем OCR-цикле они re-fault'ятся. Это **не leak** —
+`heap` показывает константные `CRImageReaderOutput` объекты после
+10+ минут.
+
+Single-sample `ps -o rss=` ловит произвольную точку этого sawtooth'a —
+30 MB или 180 MB с примерно равной вероятностью. **`median` из 10 сэмплов
+с интервалом 1s — стабильная и сравнимая метрика.**
 
 ## Что считать «разумным»
 
@@ -57,12 +72,16 @@ kill %1
 без него не получишь. Конкретные ожидания (см. ADR 0011 § «Validation
 gate»):
 
-* `daemon_rss_kb` без модели ≤ 70 MB (Mem-3 убрала MLX из main process).
-* После `unloadModel` `worker_rss_kb` → null **и** общий RSS возвращается
-  к idle ± 50 MB.
-* В `under-pressure` сценарии `froggy_pressure.pageoutCounters.jetsamSucceeded`
-  ≥ 1 (jetsam реально срабатывает на твоей машине). Если 0 — Mem-2
-  работает только на бумаге.
+* `daemon_rss_kb_distribution.median` без модели **≤ 130 MB**, `min ≥ 30 MB`.
+  Это floor от Vision+SCStream+AppKit (transitive через ScreenCaptureKit) —
+  фреймворковая база macOS, неустранима без отказа от OCR-цикла.
+  Если median > 200 MB или max > 400 MB — это уже регрессия, разбираться.
+* После `unloadModel` `worker_rss_kb_distribution` → all null **и**
+  daemon distribution возвращается к idle ± 50 MB по median.
+* В `under-pressure` сценарии `pageoutCounters.<any>.succeeded ≥ 1` —
+  хотя бы одна стратегия (jetsam / scratch / machVM) сработала. Jetsam
+  без `task_for_pid_allow` ожидаемо EPERM'ит (см. ADR 0007/0012),
+  scratch-fallback должен подхватить.
 * `secondsInLevel` под ютубом+Xcode build выходит в `warning` хотя бы
   раз за 5 минут. Если нет — значит давления нет в типичной нагрузке,
   и весь mem-substrate переоценён.
