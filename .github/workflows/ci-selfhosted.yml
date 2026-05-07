@@ -1,0 +1,42 @@
+name: CI (self-hosted)
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# Single self-hosted runner — нет смысла очередить параллельные сборки одной ветки.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-test:
+    name: Build & test (self-hosted)
+    runs-on: [self-hosted, macOS, ARM64]
+    timeout-minutes: 45
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Не очищаем workspace — сохраняем .build/checkouts/mlx-swift
+          # между запусками. Self-hosted runner persistent, экономит ~minutes
+          # на каждом билде против повторного git-clone mlx-swift.
+          clean: false
+
+      - name: Show toolchain
+        run: |
+          swift --version
+          xcrun -sdk macosx metal --version 2>&1 || true
+          uname -a
+
+      - name: Build (release + metallib pre-build + post-build copy)
+        run: make release
+
+      - name: Test
+        run: make test
