@@ -10,7 +10,7 @@
 К демону прилагается menubar-приложение (SwiftUI `MenuBarExtra`) и Unix-socket
 IPC, через который можно дёргать его из любого языка.
 
-📖 [POSITIONING](docs/POSITIONING.md) · [ADR'ы](docs/adr/) · [Packaging](packaging/README.md)
+📖 [THESIS](docs/THESIS.md) · [POSITIONING](docs/POSITIONING.md) · [ADR'ы](docs/adr/) · [Packaging](packaging/README.md)
 📬 Контакт: [@froggychips](https://t.me/froggychips) в Telegram
 📜 Лицензия: [MIT](LICENSE)
 

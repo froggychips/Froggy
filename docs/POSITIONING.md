@@ -5,6 +5,11 @@ and would-be users can decide quickly whether it's relevant to them — and
 so contributors don't open issues asking for things that are explicitly
 out of scope.
 
+> POSITIONING is about **scope** (what's in, what's out). For the central
+> argument behind the project — why aggressive memory orchestration plus
+> a trust-governance layer is the entire point, not an incidental choice —
+> see [`THESIS.md`](THESIS.md).
+
 ## What Froggy is
 
 - A **research-grade scaffold** for running local MLX models on
