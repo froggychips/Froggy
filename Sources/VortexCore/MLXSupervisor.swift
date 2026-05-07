@@ -31,6 +31,10 @@ public enum MLXSupervisorError: Error, Sendable, CustomStringConvertible {
 public actor MLXSupervisor {
     private static let log = Logger(subsystem: "com.froggychips.froggy", category: "mlx-supervisor")
     private static let signposter = OSSignposter(subsystem: "com.froggychips.froggy", category: "mlx-supervisor")
+    /// POI-канал — Instruments автоматически рендерит это в Points of
+    /// Interest track'е без `.instrpkg`. Используется для MLX lifecycle
+    /// overlay'я (load/unload/generate).
+    private static let poi = OSSignposter(subsystem: "com.froggychips.froggy", category: "PointsOfInterest")
 
     private let workerURL: URL
     private let memoryLimitBytes: Int
@@ -79,6 +83,11 @@ public actor MLXSupervisor {
         let interval = Self.signposter.beginInterval("mlx.load")
         defer { Self.signposter.endInterval("mlx.load", interval) }
 
+        // POI: от spawn'а worker'а до first IPC ack (.ready).
+        let poiId = Self.poi.makeSignpostID()
+        let poiState = Self.poi.beginInterval("mlx_load", id: poiId, "model_path=\(modelPath)")
+        defer { Self.poi.endInterval("mlx_load", poiState) }
+
         try ensureWorkerSpawned()
 
         let id = UUID().uuidString
@@ -114,6 +123,20 @@ public actor MLXSupervisor {
     /// `p.isRunning`.
     public func unloadModel() async {
         guard let p = process else { return }
+
+        // POI: от shutdown-сигнала до full reap'а worker'а.
+        let workerPid = p.processIdentifier
+        let poiId = Self.poi.makeSignpostID()
+        let poiState = Self.poi.beginInterval("mlx_unload", id: poiId, "pid=\(workerPid)")
+        var graceful = false
+        defer {
+            Self.poi.endInterval(
+                "mlx_unload",
+                poiState,
+                "pid=\(workerPid) graceful=\(graceful ? 1 : 0)"
+            )
+        }
+
         try? sendCommand(.init(cmd: MLXWorkerCommand.shutdown, requestId: UUID().uuidString))
 
         let exited = await Self.waitForExit(p, timeout: .seconds(3))
@@ -122,6 +145,8 @@ public actor MLXSupervisor {
             // SIGKILL гарантирован kernel'ом, но `waitUntilExit` нужен чтобы
             // дождаться reaping zombie'я и termination handler'а Process'a.
             await Self.waitForReap(p)
+        } else {
+            graceful = true
         }
         cleanup(reason: "unload")
     }
@@ -234,6 +259,21 @@ public actor MLXSupervisor {
     ) async throws {
         guard isLoaded() else { throw MLXSupervisorError.modelNotLoaded }
 
+        // POI: от prompt-write до final-token (либо error). chunks_count в
+        // metadata позволяет видеть streaming-progress в Instruments.
+        let poiId = Self.poi.makeSignpostID()
+        let poiState = Self.poi.beginInterval(
+            "mlx_generate", id: poiId, "max_tokens=\(maxTokens) prompt_chars=\(prompt.count)"
+        )
+        var chunkCount = 0
+        defer {
+            Self.poi.endInterval(
+                "mlx_generate",
+                poiState,
+                "chunks=\(chunkCount) max_tokens=\(maxTokens)"
+            )
+        }
+
         let id = UUID().uuidString
         let stream = registerRequest(id: id)
         try sendCommand(.init(cmd: MLXWorkerCommand.generate, prompt: prompt, maxTokens: maxTokens, requestId: id))
@@ -241,7 +281,10 @@ public actor MLXSupervisor {
         for try await event in stream {
             switch event.event {
             case MLXWorkerEvent.chunk:
-                if let text = event.text { continuation.yield(text) }
+                if let text = event.text {
+                    chunkCount += 1
+                    continuation.yield(text)
+                }
             case MLXWorkerEvent.done:
                 return
             case MLXWorkerEvent.error:

@@ -26,6 +26,9 @@ public enum IPCServerError: Error, Sendable, CustomStringConvertible {
 /// JSON-строк, последняя имеет `final == true`.
 public actor IPCServer {
     private static let log = Logger(subsystem: "com.froggychips.froggy", category: "ipc")
+    /// POI-канал — Instruments автоматически рендерит это в Points of
+    /// Interest track'е. Используется для IPC roundtrip overlay'я.
+    private static let poi = OSSignposter(subsystem: "com.froggychips.froggy", category: "PointsOfInterest")
 
     private let socketPath: String
     private let handler: any IPCRequestHandler
@@ -190,6 +193,13 @@ public actor IPCServer {
             writeJSONLine(.failure("malformed request"), to: fd)
             return
         }
+        // POI: один interval на весь IPC roundtrip — от parse'а до response-write.
+        // Streaming запросы тоже укладываются в один interval — от parse до
+        // final-chunk'а. В Instruments видно cmd → длительность.
+        let poiId = poi.makeSignpostID()
+        let poiState = poi.beginInterval("ipc_request", id: poiId, "cmd=\(req.cmd)")
+        defer { poi.endInterval("ipc_request", poiState, "cmd=\(req.cmd)") }
+
         // Streaming-путь, если handler его реализует.
         if let stream = handler.handleStream(req) {
             do {

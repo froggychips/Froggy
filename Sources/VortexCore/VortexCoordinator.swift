@@ -15,6 +15,9 @@ import os
 public actor VortexCoordinator: WorkspaceTerminationWatcher.Sink {
     private static let log = Logger(subsystem: "com.froggychips.froggy", category: "coordinator")
     private static let signposter = OSSignposter(subsystem: "com.froggychips.froggy", category: "coordinator")
+    /// POI-канал — Instruments автоматически рендерит это в track
+    /// «Points of Interest». Используется для freeze-cycle overlay'я.
+    private static let poi = OSSignposter(subsystem: "com.froggychips.froggy", category: "PointsOfInterest")
 
     public let mlx: MLXSupervisor
     public let vortex: any VortexFreezing
@@ -200,6 +203,21 @@ public actor VortexCoordinator: WorkspaceTerminationWatcher.Sink {
         if sleeping {
             Self.log.info("policy event ignored: system is sleeping (level=\(level.rawValue, privacy: .public))")
             return
+        }
+        // POI: один interval на весь freeze-cycle от pressure-event'а до
+        // окончания SIGSTOP+pageout chain. В Instruments видно длительность
+        // реакции на каждый level-change. На `.normal` interval короткий —
+        // только cancel'ит thawTask и возвращается, основная работа в детач'е.
+        let poiId = Self.poi.makeSignpostID()
+        let poiState = Self.poi.beginInterval(
+            "freeze_cycle", id: poiId, "pressure_level=\(level.rawValue)"
+        )
+        defer {
+            Self.poi.endInterval(
+                "freeze_cycle",
+                poiState,
+                "pressure_level=\(level.rawValue) tier1=\(self.tier1Frozen.count) tier2=\(self.tier2Frozen.count)"
+            )
         }
         switch level {
         case .warning:
