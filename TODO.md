@@ -347,14 +347,6 @@ honest-stop паттерн, что и для memory/power baseline.
 * **SwiftData / Core Data вместо SQLite3.** Replacing for
   replacement's sake; миграции уже описаны.
 
-## Долг ADR-нумерации
-
-* **Дубликат `0009-design-docs-after-implementation.md`** в
-  `docs/adr/`. Содержание идентично 0011 (см. примечание о нумерации
-  в 0011). При следующем касании ADR-инфраструктуры — удалить
-  дубликат, обновить cross-reference в `THESIS.md` с 0009 на 0011, в
-  `CONTRIBUTING.md` тоже.
-
 ## Меньшие хвосты
 * `/security-review` на Mem-5 (SQLite + телеметрия) — формально
   пропущен в автономном режиме. ADR 0010 содержит security-секцию
@@ -362,8 +354,6 @@ honest-stop паттерн, что и для memory/power baseline.
 * `/simplify` на `MLXSupervisor.swift` + `FroggyMLXWorker/main.swift`
   после Worktree A — проверить, не подросло ли там лишнее с момента
   Mem-3.
-* CI workflow на Froggy всё ещё `startup_failure` (account-level
-  Actions activation у `froggychips`).
 * Hooks из `phase-mem/00-infra` (PR #15) активируются только в
   следующей сессии Claude Code — текущая их не подхватит.
 * Git committer email = `yaroslav@JabBook-Air-m3.local` (machine

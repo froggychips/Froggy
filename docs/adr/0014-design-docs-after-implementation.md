@@ -1,8 +1,17 @@
-# ADR 0009 — Design-doc'и не гонятся вперёд имплементации
+# ADR 0014 — Design-doc'и не гонятся вперёд имплементации
 
 * **Статус:** Accepted
 * **Дата:** 2026-05-07
-* **Связано с:** [`THESIS.md`](../THESIS.md), `docs/design/*.md`
+* **Связано с:** [`THESIS.md`](../THESIS.md), `docs/design/*.md`,
+  [`0011-code-first-design-second-for-level-2.md`](0011-code-first-design-second-for-level-2.md)
+  (конкретный gate Уровня 2 — инстанс этого общего правила)
+
+> **История нумерации.** Этот ADR изначально лежал под номером 0009;
+> позже на тот же номер был добавлен `0009-kv-cache-quantization.md`,
+> возникла коллизия. Перенумерован в 0014 при её resolution'е — общий
+> принцип сохранён здесь, KV-cache остался под 0009 (на него ссылается
+> `README.md`). Cross-references в `THESIS.md` и `CONTRIBUTING.md`
+> обновлены.
 
 ## Контекст
 

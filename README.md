@@ -98,7 +98,8 @@ Sources/
 Tests/                    — 100+ tests, swift test --parallel
 docs/adr/                 — architectural decision records
 packaging/                — LaunchAgent .plist + entitlements + install recipe
-.github/workflows/ci.yml  — macos-14 build + test, .build cache keyed on Package.swift
+.github/workflows/        — ci-selfhosted.yml (primary, self-hosted ARM64)
+                            + ci.yml (hosted macos-14 fallback)
 ```
 
 ## Quick start
