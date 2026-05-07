@@ -4,13 +4,18 @@ This directory contains the bits needed to install `FroggyDaemon` as a per-user
 LaunchAgent. **None of this is run by CI** — codesigning and notarization
 require Apple Developer ID secrets that don't belong in the repo.
 
-## 1. Build a release binary
+## 1. Build release binaries
 
 ```sh
 swift build -c release --product FroggyDaemon
+swift build -c release --product FroggyMLXWorker
+swift build -c release --product FroggyMenuBar
+swift build -c release --product froggy
 ```
 
-The binary lands in `.build/arm64-apple-macosx/release/FroggyDaemon`.
+С Mem-3 у нас **два** обязательных бинаря для работы LLM: `FroggyDaemon`
+и `FroggyMLXWorker`. Worker должен лежать рядом с демоном (`<exec_dir>/FroggyMLXWorker`)
+или путь к нему указан в `config.json` (`mlxWorkerPath`). См. ADR 0008.
 
 ## 2. Codesign with hardened runtime + entitlements
 

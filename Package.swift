@@ -12,9 +12,11 @@ let package = Package(
     products: [
         .executable(name: "FroggyDaemon", targets: ["FroggyDaemon"]),
         .executable(name: "FroggyMenuBar", targets: ["FroggyMenuBar"]),
+        .executable(name: "FroggyMLXWorker", targets: ["FroggyMLXWorker"]),
         .executable(name: "froggy", targets: ["FroggyCLI"]),
         .library(name: "VortexCore", targets: ["VortexCore"]),
         .library(name: "LushaBridge", targets: ["LushaBridge"]),
+        .library(name: "MLXWorkerProtocol", targets: ["MLXWorkerProtocol"]),
     ],
     dependencies: [
         .package(url: "https://github.com/ml-explore/mlx-swift-lm", from: "3.0.0"),
@@ -36,14 +38,29 @@ let package = Package(
             dependencies: ["VortexCore"],
             swiftSettings: strictConcurrency
         ),
-        .target(
-            name: "VortexCore",
+        // Worker — единственный таргет, тащащий MLX runtime. Демон убивает
+        // его на unloadModel, и unified memory возвращается ядру.
+        .executableTarget(
+            name: "FroggyMLXWorker",
             dependencies: [
+                "MLXWorkerProtocol",
                 .product(name: "MLXLLM", package: "mlx-swift-lm"),
                 .product(name: "MLXLMCommon", package: "mlx-swift-lm"),
                 .product(name: "MLXHuggingFace", package: "mlx-swift-lm"),
                 .product(name: "Tokenizers", package: "swift-transformers"),
             ],
+            swiftSettings: strictConcurrency
+        ),
+        // Общий протокол wire-формата — ни демон, ни worker не должны
+        // знать друг о друге; оба знают про этот target.
+        .target(
+            name: "MLXWorkerProtocol",
+            dependencies: [],
+            swiftSettings: strictConcurrency
+        ),
+        .target(
+            name: "VortexCore",
+            dependencies: ["MLXWorkerProtocol"],
             swiftSettings: strictConcurrency
         ),
         .target(

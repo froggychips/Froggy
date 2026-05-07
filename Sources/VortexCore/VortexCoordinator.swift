@@ -1,7 +1,7 @@
 import Foundation
 import os
 
-/// Связывает `MLXActor` и `VortexActor` через `MemoryPressureMonitor`.
+/// Связывает `MLXSupervisor` и `VortexActor` через `MemoryPressureMonitor`.
 /// Phase «Mem-1»: вместо однократного preflight-freeze перед `loadModel` —
 /// постоянная подписка на стрим уровня unified memory. Tier-1 морозим
 /// при `.warning`, Tier-2 — при `.critical`, оттепель — постепенно при
@@ -11,7 +11,7 @@ public actor VortexCoordinator {
     private static let log = Logger(subsystem: "com.froggychips.froggy", category: "coordinator")
     private static let signposter = OSSignposter(subsystem: "com.froggychips.froggy", category: "coordinator")
 
-    public let mlx: MLXActor
+    public let mlx: MLXSupervisor
     public let vortex: any VortexFreezing
     public let monitor: MemoryPressureMonitor
 
@@ -27,7 +27,7 @@ public actor VortexCoordinator {
     private var thawTask: Task<Void, Never>?
 
     public init(
-        mlx: MLXActor,
+        mlx: MLXSupervisor,
         vortex: any VortexFreezing,
         monitor: MemoryPressureMonitor,
         tier1BundleIds: [String],

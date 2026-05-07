@@ -48,8 +48,8 @@ final class VortexCoordinatorPolicyTests: XCTestCase {
             "tier1.app": tier1Pids,
             "tier2.app": tier2Pids,
         ])
-        // MLXActor нужен реальный (его не дёргаем), просто чтобы Coordinator проинициализировался.
-        let mlx = MLXActor()
+        // MLXSupervisor нужен реальный (его не дёргаем), просто чтобы Coordinator проинициализировался.
+        let mlx = MLXSupervisor()
         let coord = VortexCoordinator(
             mlx: mlx,
             vortex: stub,

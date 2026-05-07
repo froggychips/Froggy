@@ -13,13 +13,20 @@ public actor FrozenPidsStore {
         public let pid: Int32
         public let executablePath: String
         public let frozenAt: Date
+        /// `nil` — это «обычный» SIGSTOP-процесс (Slack/Spotify/...), recover
+        /// шлёт ему SIGCONT. `"worker"` — наш собственный `FroggyMLXWorker`,
+        /// recover убивает его SIGKILL'ом. См. ADR 0008.
+        public let category: String?
 
-        public init(pid: Int32, executablePath: String, frozenAt: Date = Date()) {
+        public init(pid: Int32, executablePath: String, frozenAt: Date = Date(), category: String? = nil) {
             self.pid = pid
             self.executablePath = executablePath
             self.frozenAt = frozenAt
+            self.category = category
         }
     }
+
+    public static let categoryWorker = "worker"
 
     private let fileURL: URL
 
@@ -63,20 +70,26 @@ public actor FrozenPidsStore {
         load()
     }
 
-    /// Шлёт SIGCONT каждой сохранённой записи и очищает файл.
-    /// Вызывать ДО старта capture-цикла на запуске демона.
-    /// Возвращает количество восстановленных pids — для логов.
+    /// Boot-recovery. Для обычных записей шлём SIGCONT, для записей с
+    /// `category == "worker"` — SIGKILL (если worker сирота, убиваем его
+    /// насовсем — модель в его адресном пространстве уже не нужна).
+    /// Файл очищается полностью.
+    /// Возвращает количество обработанных записей.
     @discardableResult
     public func recover() -> Int {
         let entries = load()
         guard !entries.isEmpty else { return 0 }
+        var thawed = 0, killed = 0
         for entry in entries {
-            // Лучше попытаться лишний раз, чем оставить чужой процесс залипшим.
-            // ESRCH (процесса уже нет) — нормально, EPERM (чужой пользователь)
-            // — тоже не наша забота на recovery-пути.
-            _ = kill(entry.pid, SIGCONT)
+            if entry.category == Self.categoryWorker {
+                _ = kill(entry.pid, SIGKILL)
+                killed += 1
+            } else {
+                _ = kill(entry.pid, SIGCONT)
+                thawed += 1
+            }
         }
-        Self.log.notice("recovered \(entries.count) frozen pids on startup")
+        Self.log.notice("recovered \(thawed) frozen pids + killed \(killed) worker pids on startup")
         write([])
         return entries.count
     }
