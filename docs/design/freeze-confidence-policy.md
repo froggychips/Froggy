@@ -268,6 +268,28 @@ Reading the defaults:
 - **`restPeriod < cooldown < maxDuration < budget`** — invariant
   preserved by config validation at startup.
 
+### Editing exclusions and overrides at runtime
+
+`freezeExclusion` and `activityConfidenceOverride` are user-facing
+trust controls. The user has two equivalent ways to change them:
+
+1. **Edit `~/Library/Application Support/Froggy/config.json` and
+   restart the daemon.** Stable, scriptable, the source of truth.
+2. **Click `[never freeze]` on a per-app row in the menubar** (see
+   [`explainability-menubar.md`](explainability-menubar.md) L3). The
+   menubar sends `addExclusion <bundleId>` over IPC; the daemon
+   updates the in-memory config, persists it to `config.json`, and
+   triggers immediate thaw if needed. No restart required.
+
+Both paths produce the same final state. The IPC path exists because
+asking a user mid-frustration ("Slack just got frozen during my
+call") to edit JSON and restart a daemon is unrealistic. Inline
+exclusion is the trust-recovery mechanism after a bad freeze.
+
+Implementation note: the persist-to-disk step uses an atomic
+write (write-to-temp + rename) to avoid corrupting `config.json` on
+crash mid-write.
+
 ## API
 
 ```swift

@@ -43,9 +43,13 @@ business logic. Decision-making lives upstream; this layer only
 
 ## Non-goals
 
-- **Not a control panel.** Thaw / freeze controls live elsewhere
-  (existing menubar already has Thaw All). This is *explanation*,
-  not *manipulation*.
+- **Not a control panel.** A separate freeze/thaw control surface
+  outside the explanation context is out of scope (existing menubar
+  already has Thaw All). However, **per-row contextual actions tied
+  directly to the explanation** *are* in scope — see L3 below. The
+  rule: an action is allowed inline if its meaning is unambiguous
+  given the explanation right next to it ("thaw this one Slack you
+  just told me about"). Anything more abstract goes elsewhere.
 - **Not a metrics dashboard.** Pressure gauges and freed-RAM totals
   are useful context, but Froggy's job isn't to replace Activity
   Monitor.
@@ -131,7 +135,7 @@ For each app currently frozen or recently considered:
 
 ```
 ┌─────────────────────────────────────────────────────────┐
-│ Slack                                          [why?]   │
+│ Slack                       [why?] [thaw] [never freeze]│
 │ Frozen 18 min ago · ~600 MB freed · thaw in ~4 min      │
 └─────────────────────────────────────────────────────────┘
 ```
@@ -148,6 +152,36 @@ For an app *considered but skipped*:
 Skipped rows are visible only briefly (~30 s) — they answer "I
 just felt my Mac get less responsive, what changed?" but don't
 clutter long-term.
+
+### Inline actions on frozen rows
+
+Two per-row actions next to the `[why?]` link, only on rows
+representing currently-frozen apps:
+
+- **`[thaw]`** — immediate `SIGCONT` for *this specific app*,
+  bypassing pressure-based auto-thaw timing. Existing IPC has
+  `thawAll`; this requires a new command (see "API additions" below).
+  The action does **not** add the app to any exclusion list — it's a
+  one-shot override for this freeze, the next pressure event will
+  reconsider the app normally.
+- **`[never freeze]`** — adds the app's `bundleId` to
+  `freezeExclusion` in `FroggyConfig` (defined in
+  [`freeze-confidence-policy.md`](freeze-confidence-policy.md)) and
+  triggers an immediate thaw. After this, the policy engine will
+  refuse to consider this app at all. Confirmation toast: "Slack added
+  to freeze exclusion list."
+
+These actions are tied to the explanation context — the user is
+seeing *why* an app is frozen, and the natural follow-up is "actually,
+don't do this." Surfacing controls anywhere else is out of scope.
+
+A third potential action — **`[lower threshold]`** which would write
+to `activityConfidenceOverride` to make freeze less aggressive without
+fully excluding — is deferred. It's harder to explain in one button-
+label and the two coarser actions cover the realistic use cases.
+
+Skipped rows have no inline actions: the user already has the outcome
+they wanted (the app stayed running), no follow-up is needed.
 
 ## L4: Per-decision trace
 
@@ -262,7 +296,7 @@ Other languages: deferred until external contributor demand.
 
 ### IPC
 
-Two new commands:
+Read-only commands for the explanation surface:
 
 ```
 decisions [--limit N]
@@ -277,9 +311,32 @@ decisionsLive
   emerge. Used by menubar; can be used by external tools.
 ```
 
+State-mutating commands for the L3 inline actions:
+
+```
+thaw <pid>
+  Immediate SIGCONT for a single pid. Distinct from existing
+  thawAll. Validates pid is currently frozen by Froggy (refuses on
+  unknown pid to prevent escalation through this command).
+
+addExclusion <bundleId>
+  Adds bundleId to FroggyConfig.freezeExclusion, persists to
+  config.json, and triggers immediate thaw if the app is currently
+  frozen. Idempotent. Used by [never freeze] action.
+
+removeExclusion <bundleId>
+  Inverse of addExclusion. Not exposed in menubar by default but
+  needed for the config to be edit-able by humans through the same
+  IPC surface (avoids forcing JSON editing).
+```
+
 The decisions endpoint is also publicly useful: bug reports become
 easier when a user can attach `froggy decisions --limit 50 > log.json`
 without revealing more than they intended.
+
+The state-mutating endpoints respect the existing IPC trust model —
+the Unix socket is filesystem-permissioned, not authenticated; same
+trust boundary as the rest of the daemon.
 
 ### `FroggyMenuBar` views
 
