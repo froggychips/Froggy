@@ -35,6 +35,12 @@ public actor MLXSupervisor {
     private let workerURL: URL
     private let memoryLimitBytes: Int
     private let pidStore: FrozenPidsStore?
+    /// `--kv-bits` аргумент для worker-process. 16 → без квантизации.
+    private let kvCacheBits: Int
+    /// Дополнительные аргументы worker'а — нужны интеграционным тестам,
+    /// чтобы переключать `FroggyMLXWorkerFake` в режимы `ignore-shutdown`/
+    /// `crash-on-generate`.
+    private let extraArgs: [String]
 
     private var process: Process?
     private var stdinHandle: FileHandle?
@@ -45,13 +51,19 @@ public actor MLXSupervisor {
     public init(
         memoryLimitBytes: Int? = nil,
         workerExecutableURL: URL? = nil,
-        pidStore: FrozenPidsStore? = nil
+        pidStore: FrozenPidsStore? = nil,
+        kvCacheBits: Int = 8,
+        extraArgs: [String] = []
     ) {
         let physical = Int(ProcessInfo.processInfo.physicalMemory)
         self.memoryLimitBytes = memoryLimitBytes ?? max(2 << 30, physical * 6 / 10)
         self.workerURL = workerExecutableURL ?? Self.defaultWorkerURL()
         self.pidStore = pidStore
+        self.kvCacheBits = kvCacheBits
+        self.extraArgs = extraArgs
     }
+
+    public func currentKVCacheBits() -> Int { kvCacheBits }
 
     /// Ищем worker рядом с FroggyDaemon: `<exec_dir>/FroggyMLXWorker`.
     /// Если файла нет — ошибка будет на `loadModel`, а не на init.
@@ -88,34 +100,20 @@ public actor MLXSupervisor {
         throw MLXSupervisorError.workerCrashed
     }
 
-    /// Graceful shutdown: shutdown-команда → ждём goodbye до 3 секунд →
-    /// SIGKILL. После выхода peak memory worker'а возвращается ядру.
+    /// Graceful shutdown: shutdown-команда → poll до 3 секунд → SIGKILL.
+    /// Ранее был хитрый withTaskGroup'овый wait через AsyncThrowingStream,
+    /// но stream без `goodbye` никогда не finish'ится, и ветка `for try
+    /// await` в group'е продолжала висеть после `cancelAll()`. Теперь —
+    /// прямой polling `process.isRunning`.
     public func unloadModel() async {
         guard let p = process else { return }
+        try? sendCommand(.init(cmd: MLXWorkerCommand.shutdown, requestId: UUID().uuidString))
 
-        // Отправим shutdown best-effort.
-        let id = UUID().uuidString
-        let stream = registerRequest(id: id)
-        try? sendCommand(.init(cmd: MLXWorkerCommand.shutdown, requestId: id))
-
-        // Ждём goodbye до 3 секунд параллельно с тайм-аутом.
-        let waitTask = Task {
-            for try await event in stream where event.event == MLXWorkerEvent.goodbye {
-                return
-            }
+        // Ждём грациозного exit'а до 3 секунд (30 × 100мс).
+        for _ in 0..<30 {
+            if !p.isRunning { break }
+            try? await Task.sleep(for: .milliseconds(100))
         }
-        let timeout = Task {
-            try? await Task.sleep(for: .seconds(3))
-        }
-        _ = await Task<Void, Never>.detached {
-            await withTaskGroup(of: Void.self) { group in
-                group.addTask { _ = try? await waitTask.value }
-                group.addTask { _ = await timeout.value }
-                _ = await group.next()
-                group.cancelAll()
-            }
-        }.value
-
         if p.isRunning {
             kill(p.processIdentifier, SIGKILL)
             p.waitUntilExit()
@@ -194,6 +192,7 @@ public actor MLXSupervisor {
 
         let proc = Process()
         proc.executableURL = workerURL
+        proc.arguments = ["--kv-bits", String(kvCacheBits)] + extraArgs
         let stdinPipe = Pipe()
         let stdoutPipe = Pipe()
         proc.standardInput = stdinPipe

@@ -47,6 +47,8 @@ public struct IPCResponse: Codable, Sendable {
     public var lastCaptureError: String?
     /// Mem-5 cmd `freezeStats`: топ-N bundle_id по медиане освобождения.
     public var freezeStats: [FreezeStatsStore.AggregatedStats]?
+    /// Текущее значение KV-cache битности (16/8/4) — для cmd `status`.
+    public var kvCacheBits: Int?
     /// Текущий уровень давления (`normal`/`warning`/`critical`) — для cmd `pressure`.
     public var pressureLevel: String?
     /// Pids, замороженные политикой tier-1 (warning).
