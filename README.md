@@ -211,6 +211,17 @@ See [`packaging/README.md`](packaging/README.md) — codesign + notarytool +
 suitable for attaching to bug reports. Pass `--last 1h` (or similar)
 via `scripts/logbundle.sh` directly to limit the time range.
 
+`make session-summary` collects a broader post-session bundle:
+unified-log archive (last hour by default), SQLite freeze-events
+dump from `freeze_stats.sqlite`, current `frozen.pids` and
+`config.json` snapshots, system memory state (`vm_stat` /
+`memory_pressure`), live IPC snapshots (`status` / `pressure` /
+`accessors`) when the daemon is running, plus a `notes.md` template.
+Each step is best-effort — missing pieces are listed in
+`MANIFEST.txt`. Output is a tarball next to the working directory.
+Pass `--last 4h --no-tar` via `scripts/session-summary.sh` for a
+longer window or to keep the bundle as a directory.
+
 ## Documentation
 
 The [`docs/adr/`](docs/adr/) directory captures the project's

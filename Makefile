@@ -3,7 +3,7 @@
 # Без этого pre-build шага FroggyMLXWorker не может загрузить
 # ни одной MLX-модели в release-сборке через SwiftPM.
 
-.PHONY: build build-debug release test resolve metallib logbundle clean help
+.PHONY: build build-debug release test resolve metallib logbundle session-summary clean help
 
 # Default target: release build.
 build: release
@@ -41,6 +41,13 @@ resolve:
 logbundle:
 	scripts/logbundle.sh
 
+# Собирает session-summary bundle (log + SQLite freeze events + state +
+# IPC snapshots + bench + notes template) для post-session анализа.
+# Дефолт — `--last 1h`. Для другого периода или директории — запускать
+# `scripts/session-summary.sh` напрямую.
+session-summary:
+	scripts/session-summary.sh
+
 clean:
 	swift package clean
 	rm -rf .build/metallib-work
@@ -52,4 +59,5 @@ help:
 	@echo "make test          — swift test (нужен metallib для MLX-смок-тестов)"
 	@echo "make metallib      — только пересобрать default.metallib"
 	@echo "make logbundle     — собрать froggy.logarchive для bug-report'а"
+	@echo "make session-summary — собрать session-bundle (log+SQLite+state+IPC+notes)"
 	@echo "make clean         — clean всё, включая metallib"
