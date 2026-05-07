@@ -142,8 +142,11 @@ public actor IPCClient {
         try await send(IPCRequest(cmd: "loadModel", path: path), timeout: .seconds(600))
     }
 
-    public func accessors() async throws -> IPCResponse {
-        try await send(IPCRequest(cmd: "accessors"))
+    /// Список зарегистрированных аксессоров. `experimental: true` —
+    /// только опытные (target `LushaExperimental`), `false` — только
+    /// core (`LushaBridge`), `nil` — все.
+    public func accessors(experimental: Bool? = nil) async throws -> IPCResponse {
+        try await send(IPCRequest(cmd: "accessors", experimental: experimental))
     }
 
     public func snapshot(accessorId: String) async throws -> IPCResponse {

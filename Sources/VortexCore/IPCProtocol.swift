@@ -9,6 +9,9 @@ public struct IPCRequest: Codable, Sendable {
     public var path: String?
     public var accessor: String?
     public var useContext: Bool?
+    /// Фильтр для cmd `accessors`: если nil — вернуть все; true/false —
+    /// только experimental или только core. См. ADR 0011 § EXP-1.
+    public var experimental: Bool?
 
     public init(
         cmd: String,
@@ -18,7 +21,8 @@ public struct IPCRequest: Codable, Sendable {
         maxChars: Int? = nil,
         path: String? = nil,
         accessor: String? = nil,
-        useContext: Bool? = nil
+        useContext: Bool? = nil,
+        experimental: Bool? = nil
     ) {
         self.cmd = cmd
         self.prompt = prompt
@@ -28,6 +32,7 @@ public struct IPCRequest: Codable, Sendable {
         self.path = path
         self.accessor = accessor
         self.useContext = useContext
+        self.experimental = experimental
     }
 }
 
@@ -83,12 +88,18 @@ public struct IPCResponse: Codable, Sendable {
     }
 
     /// Описание зарегистрированного Lusha-аксессора.
+    /// `experimental == true` означает, что аксессор живёт в target'е
+    /// `LushaExperimental` и помечен как опытный (ADR 0011 § EXP-1).
+    /// Поле опциональное в wire-формате — старые клиенты, не знающие
+    /// про experimental, продолжают работать.
     public struct Accessor: Codable, Sendable, Equatable {
         public var id: String
         public var name: String
-        public init(id: String, name: String) {
+        public var experimental: Bool?
+        public init(id: String, name: String, experimental: Bool? = nil) {
             self.id = id
             self.name = name
+            self.experimental = experimental
         }
     }
 }
