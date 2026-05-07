@@ -98,6 +98,48 @@ frontmost-приложений. Делается пользователем по
 * Voice (Whisper + TTS, OpenAI Realtime).
 * Takeout-ingest (загрузка экспортов из других сервисов в context store).
 
+## Зерна из external review (Grok, 2026-05-07)
+
+Из проходного внешнего review-цикла — то, что не нарушает ADR-0011 и
+имеет смысл записать как deferred items, чтобы не забыть к моменту
+соответствующих фаз:
+
+* **VortexCoordinator responsibility split.** Coordinator всё больше
+  становится single-point-of-failure: pressure events, freeze
+  decisions, model lifecycle, accessor invocations — всё через него.
+  При следующем существенном касании Coordinator'а (например, при
+  имплементации FCP-1) — рассмотреть выделение отдельных actor'ов
+  вместо ещё одной ответственности на Coordinator. **Не сейчас**, не
+  делать ради рефакторинга — gravity trap warning.
+* **Pressure-aware model swap pattern.** Когда дойдёт до VLM/Whisper
+  design — VortexCore должен решать, что выгрузить (chat LLM ↔ VLM ↔
+  Whisper) под memory pressure, а не держать всё одновременно. Это не
+  «slot manager», это reactive swap по той же логике что
+  `MemoryPressureMonitor`. Закладывать в design-doc следующего слоя,
+  не сейчас.
+* **VLM layout analysis через VNDetect*.** При переходе к structured
+  context (`VNDetectRectangles`, `VNDetectTextRectangles`) —
+  рассмотреть как fallback или дополнение к текстовому OCR до того,
+  как подключится full VLM. Промежуточная ступень между «плоский
+  OCR» и «полная VLM», возможно более уместная для 8 GB.
+* **Apple Speech как TTS-fallback** для voice-режима, помимо Piper.
+  Бесплатное по RAM, низкого качества — но как graceful degradation
+  под critical pressure (когда даже Piper нельзя загрузить) разумная
+  опция. В voice design-doc когда дойдёт.
+* **«Hey Froggy» wake word — privacy/battery review prerequisite.**
+  Always-listening на 8 GB Mac имеет огромный privacy + battery
+  surface area. Не делать без отдельного ADR, расширяющего threat
+  model в `SECURITY.md`. Push-to-talk hotkey проще и безопаснее по
+  умолчанию.
+
+## Долг ADR-нумерации
+
+* **Дубликат `0009-design-docs-after-implementation.md`** в
+  `docs/adr/`. Содержание идентично 0011 (см. примечание о нумерации
+  в 0011). При следующем касании ADR-инфраструктуры — удалить
+  дубликат, обновить cross-reference в `THESIS.md` с 0009 на 0011, в
+  `CONTRIBUTING.md` тоже.
+
 ## Меньшие хвосты
 * `/security-review` на Mem-5 (SQLite + телеметрия) — формально
   пропущен в автономном режиме. ADR 0010 содержит security-секцию
