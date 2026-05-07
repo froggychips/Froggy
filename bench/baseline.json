@@ -1,0 +1,12 @@
+[{
+  "schema_version": 1,
+  "captured_at": "2026-05-07T10:25:24Z",
+  "scenario": "under-pressure",
+  "daemon_rss_kb": 195488,
+  "worker_rss_kb": null,
+  "ttft_ms": null,
+  "vm_stat_raw": "Mach Virtual Memory Statistics: (page size of 16384 bytes)\nPages free:                                3838.\nPages active:                            103328.\nPages inactive:                           99570.\nPages speculative:                         2429.\nPages throttled:                              0.\nPages wired down:                        133280.\nPages purgeable:                           3192.\n\"Translation faults\":                7373986968.\nPages copy-on-write:                   95392473.\nPages zero filled:                   1245988448.\nPages reactivated:                   3253390971.\nPages purged:                         291756849.\nFile-backed pages:                        48301.\nAnonymous pages:                         157026.\nPages stored in compressor:             1182767.\nPages occupied by compressor:            144417.\nDecompressions:                      3440540093.\nCompressions:                        4046141311.\nPageins:                              241750290.\nPageouts:                               3292506.\nSwapins:                               65325297.\nSwapouts:                              70568125.",
+  "memory_pressure_raw": "The system has 8589934592 (524288 pages with a page size of 16384).\n\nStats: \nPages free: 3560 \nPages purgeable: 3194 \nPages purged: 291756849 \n\nSwap I/O:\nSwapins: 65325297 \nSwapouts: 70568125 \n\nPage Q counts:\nPages active: 103562 \nPages inactive: 99727 \nPages speculative: 2437 \nPages throttled: 0 \nPages wired down: 133291 \n\nCompressor Stats:\nPages used by compressor: 144332 \nPages decompressed: 3440540395 \nPages compressed: 4046141311 \n\nFile I/O:\nPageins: 241750292 \nPageouts: 3292506 \n\nSystem-wide memory free percentage: 42%",
+  "froggy_status": "null",
+  "froggy_pressure": "{\"secondsInLevel\":97,\"tier2Frozen\":[],\"final\":true,\"ok\":true,\"pageoutCounters\":{\"jetsamAttempted\":1,\"scratchSucceeded\":1,\"scratchFailed\":0,\"machVMAttempted\":0,\"machVMSucceeded\":0,\"jetsamSucceeded\":0,\"jetsamFailed\":1,\"scratchAttempted\":1,\"machVMFailed\":0},\"tier1Frozen\":[79015],\"pressureLevel\":\"critical\"}"
+}]
