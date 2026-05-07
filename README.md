@@ -1,5 +1,34 @@
 # Froggy 🐸
 
+> **Local LLM with screen-context awareness for Apple Silicon Macs — designed from the ground up for 8 GB unified memory.**
+
+Most local-LLM tools assume you have 16+ GB RAM. Froggy doesn't. It runs a
+small MLX model alongside aggressive unified-memory management — freezing
+background apps under real memory pressure (`SIGSTOP` + forced pageout),
+isolating MLX inference in a child process so unloading actually returns
+RAM to the kernel — so a 3–4 B model can coexist with your daily workflow
+on entry-level Apple Silicon.
+
+It also captures your screen via `ScreenCaptureKit`, runs Vision OCR with
+secret redaction **before** anything hits disk, and feeds that as context
+to the model — so you can ask about what you're looking at without
+sending anything to the cloud.
+
+**Status:** working personal-use scaffolding. Not a product. See
+[`docs/POSITIONING.md`](docs/POSITIONING.md) for what this is and isn't.
+
+**Stack:** Swift 6 (strict concurrency + ExistentialAny) · macOS 14+
+Apple Silicon · ScreenCaptureKit · Vision · MLX
+([`mlx-swift-lm`](https://github.com/ml-explore/mlx-swift-examples)) ·
+no Python, all native.
+
+📖 [Russian documentation below](#русская-документация) · [ADRs](docs/adr/) · [Packaging](packaging/README.md)
+📬 Contact: [@froggychips](https://t.me/froggychips) on Telegram
+
+---
+
+## Русская документация
+
 **AI-powered macOS Resource & Context Orchestrator** — нативный Swift 6
 демон для Apple Silicon, который снимает экран, делает OCR, отдаёт контекст
 локальной MLX-модели и при загрузке тяжёлой модели подмораживает фоновые
