@@ -1,7 +1,8 @@
 # ADR 0013 — `default.metallib` не собирается через `swift build` (блокер AD-1)
 
-* **Статус:** Accepted (honest-doc — задокументированная проблема, fix отложен)
+* **Статус:** Resolved (Path 1 реализован — pre-build script + post-build copy)
 * **Дата:** 2026-05-07
+* **Резолюция:** см. § «Что фактически сделано» в конце документа.
 
 ## Контекст
 
@@ -146,3 +147,71 @@ issue/PR'ы в `mlx-swift` и выбрать наименее инвазивны
   gate-criterion после фикса.
 * `Source/Cmlx/mlx/mlx/backend/metal/device.cpp` (mlx-swift checkout) —
   где идёт поиск metallib и формируется ошибка.
+
+## Что фактически сделано (2026-05-07, последующая сессия)
+
+Реализован **Path 1** с одним нюансом: SwiftPM resource declaration
+оказался не подходящим (см. ниже), поэтому используется **co-located
+post-build copy**.
+
+### Файлы, добавленные в репо
+
+* **`scripts/compile-metallib.sh`** — компилирует 9 metal-kernel'ов
+  (точный список из `mlx-swift/tools/fix-metal-includes.sh`) через
+  `xcrun -sdk macosx metal -std=metal3.1 -fno-fast-math` (флаги совпадают
+  с upstream CMakeLists), линкует через `xcrun metallib`, кладёт результат
+  в `Sources/FroggyMLXWorker/Resources/default.metallib`. Idempotent —
+  пропускает работу, если metallib свежее всех `.metal` исходников.
+  ~3.1 MB на выходе.
+* **`Makefile`** — обёртка вокруг `swift build`, делает pre-build вызов
+  скрипта и **post-build copy** в `.build/release/Resources/default.metallib`
+  (для release) или `.build/debug/Resources/default.metallib` (для debug).
+  `make build` = release, `make test` = `swift test` с правильным
+  metallib placement.
+* **`Tests/MLXWorkerMetallibTests/`** — два теста (presence в source-tree,
+  reasonable size). Зелёные после `make build`. Ловят регрессию
+  pre-build шага. Не требуют MLX-модели на диске.
+* **`Sources/FroggyMLXWorker/main.swift` → `Entry.swift`** — переименовано,
+  чтобы убрать конфликт `@main` vs «module containing top-level code»
+  если в будущем добавим SwiftPM resource declaration.
+* **`bench/baseline.json`** — добавлен 4-й snapshot: реальный
+  model-loaded c worker_rss_kb_distribution не-null. Закрывает 4-й пункт
+  validation gate.
+
+### Почему не SwiftPM resource declaration
+
+Сначала пробовал `resources: [.copy("Resources/default.metallib")]` в
+target'е `FroggyMLXWorker`. SwiftPM кладёт metallib в
+`Froggy_FroggyMLXWorker.bundle/default.metallib` (без вложенной
+`Contents/Resources/` структуры).
+
+Mlx-swift `load_swiftpm_library` итерирует `NS::Bundle::allBundles()`,
+но **этот SwiftPM-bundle не регистрируется автоматически в `allBundles`**
+(NSBundle.allBundles содержит только bundle'ы, открытые через
+`Bundle(url:)` или подгруженные dyld'ом). Доступ к `Bundle.module` тоже
+не помогает зарегистрировать его в нужном виде.
+
+Co-located путь `<binary-dir>/Resources/default.metallib` (это пункт 4
+в search order'е mlx-swift `load_default_library_internal`) **работает
+безусловно**, потому что MLX вычисляет `current_binary_dir()` и идёт
+на FS напрямую, без NSBundle.
+
+Поэтому: source-tree файл генерируется скриптом, Makefile делает
+post-build copy в нужное место. Тест проверяет source-tree наличие.
+
+### Validation gate — закрыт 4/4
+
+Прогон `bench/cycles_test.sh ~/models/llama-3.2-1b-4bit 5` (5 циклов
+load → bench → unload → bench):
+
+* **5/5 loadModel**: `{"ok":true,"modelPath":"..."}` — модель
+  загружается через scratch-fallback под critical pressure.
+* **5/5 unloadModel** + проверка `pgrep FroggyMLXWorker`: worker
+  exit'ится, `worker_rss_kb` → null в каждом post-unload snapshot'е.
+* Daemon не падает между циклами (subprocess isolation Mem-3 работает).
+* Daemon RSS под изменяющимся pressure'ом скачет 20-150 MB sawtooth'ом —
+  ожидаемо (см. ADR 0011 § distribution-based threshold).
+* Под warning pressure (один model-loaded snapshot записан в baseline):
+  daemon median 26 MB, worker median 15 MB.
+
+ADR 0011 разблокирован. AD-1 / FCP-1 / EXP-1 готовы к старту.

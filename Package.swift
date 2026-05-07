@@ -40,6 +40,14 @@ let package = Package(
         ),
         // Worker — единственный таргет, тащащий MLX runtime. Демон убивает
         // его на unloadModel, и unified memory возвращается ядру.
+        //
+        // Metal-shader'ы (`default.metallib`) собираются `scripts/compile-metallib.sh`
+        // и копируются в `.build/release/Resources/` через `make build`,
+        // откуда mlx-swift находит их по своему 4-му search-path
+        // (co-located <binary-dir>/Resources/). SwiftPM resource declaration
+        // здесь НЕ работает — bundle-структура SwiftPM не регистрируется
+        // в `NSBundle.allBundles`, и mlx-swift не итерирует через неё.
+        // См. ADR 0013 для деталей.
         .executableTarget(
             name: "FroggyMLXWorker",
             dependencies: [
@@ -87,6 +95,15 @@ let package = Package(
         .testTarget(
             name: "LushaBridgeTests",
             dependencies: ["LushaBridge"],
+            swiftSettings: strictConcurrency
+        ),
+        // Verify default.metallib is bundled with FroggyMLXWorker — иначе
+        // worker умирает на первой реальной MLX-операции (см. ADR 0013).
+        // Тест всегда зелёный после `make build`; красный означает что
+        // pre-build шаг (`scripts/compile-metallib.sh`) не отработал.
+        .testTarget(
+            name: "MLXWorkerMetallibTests",
+            dependencies: [],
             swiftSettings: strictConcurrency
         ),
     ]
