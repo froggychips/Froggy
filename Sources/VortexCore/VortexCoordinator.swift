@@ -42,6 +42,15 @@ public actor VortexCoordinator: WorkspaceTerminationWatcher.Sink {
     /// первом изменении, поэтому ничего форсировать не нужно.
     private var sleeping: Bool = false
 
+    /// Pid frontmost-app — закешированный через `WorkspaceEvent.frontmostChanged`.
+    /// **Никогда не морозим** этот pid, даже если его bundleId в tier-1/tier-2
+    /// allowlist. Закрывает failure mode «freeze посередине набора текста»
+    /// — пользователь активно работает с этой app, замораживать её = баг
+    /// для пользователя. См. ADR 0015.
+    /// `nil` означает «frontmost не определён» (login window, lock screen);
+    /// в этом состоянии veto не применяется (и так морозим что хотим).
+    private var frontmostPid: Int32?
+
     public init(
         mlx: MLXSupervisor,
         vortex: any VortexFreezing,
@@ -73,8 +82,18 @@ public actor VortexCoordinator: WorkspaceTerminationWatcher.Sink {
                 await self?.applyPolicy(level)
             }
         }
-        // Sleep/wake gating — отдельный task, чтобы не путать с pressure-loop'ом.
+        // Sleep/wake gating + frontmost-veto — отдельный task, чтобы не
+        // путать с pressure-loop'ом.
         if let workspaceSource {
+            // Seed frontmost ДО подписки на стрим: иначе первое окно
+            // между `startMonitoring` и первым `.frontmostChanged` event'ом
+            // мы морозили бы frontmost-app по bundleId-allowlist'у.
+            let initial = await workspaceSource.initialFrontmostPid()
+            self.frontmostPid = initial
+            if let initial {
+                Self.log.info("frontmost seed: pid=\(initial, privacy: .public)")
+            }
+
             let wsStream = workspaceSource.events()
             workspaceTask = Task { [weak self] in
                 for await event in wsStream {
@@ -187,6 +206,25 @@ public actor VortexCoordinator: WorkspaceTerminationWatcher.Sink {
             // изменении ядра. Просто снимаем gate.
             Self.log.notice("system did wake — freeze loop ungated")
             sleeping = false
+        case let .frontmostChanged(pid, _):
+            // Кешируем pid frontmost-app для frontmost-veto в `freezeTier`.
+            // Если в момент смены фокуса этот pid уже заморожен в одном
+            // из tier'ов (race: пользователь активировал app, которая
+            // только что попала под freeze), — сразу его отпустить, чтобы
+            // не оставлять frontmost в SIGSTOP. Это редкий corner-case,
+            // но он закрывает race-window между applyPolicy и
+            // frontmostChanged.
+            frontmostPid = pid
+            if let pid {
+                let inT1 = tier1Frozen.contains(pid)
+                let inT2 = tier2Frozen.contains(pid)
+                if inT1 || inT2 {
+                    Self.log.notice("frontmost activated mid-freeze: thawing pid=\(pid, privacy: .public)")
+                    await vortex.thawProcess(pid: pid)
+                    tier1Frozen.remove(pid)
+                    tier2Frozen.remove(pid)
+                }
+            }
         default:
             // Activate/deactivate/terminate/screen-events — не наша забота
             // на этом слое (terminate ловит WorkspaceTerminationWatcher,
@@ -254,6 +292,14 @@ public actor VortexCoordinator: WorkspaceTerminationWatcher.Sink {
         for pid in pids {
             // Skip уже-замороженные в любом из tier'ов.
             if tier1Frozen.contains(pid) || tier2Frozen.contains(pid) { continue }
+            // Frontmost-veto (ADR 0015): pid frontmost-app никогда не морозим,
+            // даже если его bundleId в allowlist'е. Закрывает «freeze
+            // посередине набора текста». NSWorkspace-only уровень — typing
+            // через Accessibility API явно вне scope'а.
+            if let frontmostPid, pid == frontmostPid {
+                Self.log.info("freeze pid=\(pid, privacy: .public) tier=\(String(describing: tier), privacy: .public) vetoed: frontmost")
+                continue
+            }
             do {
                 try await vortex.freezeProcess(pid: pid)
                 switch tier {
