@@ -55,7 +55,13 @@ ADR 0011 validation gate закрыт 4/4.
 
 * **AD-1 — frontmost-veto.** `VortexCoordinator` не морозит pid
   frontmost-app, даже если bundleId в `freezeTier1BundleIds`. Закрывает
-  embarassing failure mode «freeze посередине набора текста».
+  embarassing failure mode «freeze посередине набора текста». В ADR
+  AD-1 явно решить scope: **minimal** (только `NSWorkspace`
+  frontmost-app + window-title) либо **extended** (+ Accessibility
+  API: `AXFocusedUIElementAttribute` + `AXValueChangedNotification` →
+  typing-veto). Extended даёт прямой signal «пользователь печатает»,
+  но требует TCC Accessibility permission и расширения threat model
+  в `SECURITY.md`.
 * **FCP-1 — frame-cycle pacing.** `VisionActor` отбрасывает frame'ы из
   `SCStream`, пришедшие раньше `1 / captureIntervalSeconds`. Сейчас
   pacing внешний (Task.sleep между cycles); нужен внутренний.
@@ -192,6 +198,14 @@ freeze'ов или нет. Не «pageouts были», а «никого не у
   - `Process` → `log stream --predicate 'subsystem == "com.apple.kernel"
     AND eventMessage CONTAINS "memorystatus"'` — без entitlement,
     через подпроцесс. Pragmatic путь.
+* `MXMetricManagerSubscriber` actor — Apple-blessed daily-aggregate
+  source поверх `MXAppExitMetric` (macOS 14+,
+  `cumulativeMemoryResourceLimitExitCount` = jetsam-killed). Без
+  developer-mode private-data toggle, в отличие от log_stream — но
+  daily delivery, не real-time. Это **complement, не замена**:
+  log_stream — dev/baseline real-time signal (брит к kernel-формату),
+  MetricKit — prod ground-truth с задержкой суток. Поток в ту же
+  таблицу `jetsam_events` с маркером `source = log_stream | metrickit`.
 * Парсер: PID, имя процесса (если не редактирован), reason (highwater
   / no-pages / vm-thrashing). Структурированный event в
   `FreezeStatsStore` — новая таблица `jetsam_events`.
@@ -286,6 +300,53 @@ honest-stop паттерн, что и для memory/power baseline.
   model в `SECURITY.md`. Push-to-talk hotkey проще и безопаснее по
   умолчанию.
 
+## Зерна из API-ресерча (macOS, 2026-05-07)
+
+Из ресерча по unused/underused macOS API в проекте. Низкий приоритет
+по сравнению с Power-1 / Obs-1 — записать чтобы не забыть к моменту
+соответствующих фаз, не делать сейчас.
+
+* **`NSCache` для vision/token caches.** NSCache evict'ит элементы
+  под memory pressure (kernel signal, тот же что DispatchSource).
+  Если появятся hand-rolled caches (frame buffers, tokenized prompts)
+  — NSCache даёт reactive eviction бесплатно. Применять при следующем
+  касании cache-кода, не специальным рефакторингом.
+* **`SMAppService` — modern launchd registration.** Современный путь
+  для регистрации launch agent / login item из приложения. Заменяет
+  устаревшие `SMLoginItemSetEnabled` / ручной plist в LaunchAgents.
+  Когда дойдёт до installation UX (`packaging/`), не раньше.
+* **`UserNotifications` (`UNUserNotificationCenter`)** — surface
+  critical state поверх MenuBar dot. ScreenCapture permission revoked
+  → push «restore permission». Jetsam случился несмотря на Froggy →
+  «we couldn't save app X». Отдельный feature-эпик по UX, не сейчас.
+* **`NaturalLanguage` (`NLTagger` / `NLEmbedding`)** — extraction
+  entities/topics из OCR'd text до отправки в LLM. Бесплатно по RAM
+  (десятки MB), без entitlement, без сети. Для context store /
+  prompt augmentation в Уровне 2 — сэкономит токены. Промежуточная
+  ступень между OCR и LLM.
+* **FSEvents (`FSEventStream`)** — реактивный watch directory'ев для
+  config reload, model checkpoint changes, или user-data tracking
+  для context store. Без polling. Низкий приоритет — нет конкретной
+  задачи под него.
+
+### Не для нас (зафиксировано чтобы не возвращаться)
+
+* **EndpointSecurity (ESF).** System Extension entitlement →
+  notarization-special, install-time UX «extension wants to see all
+  events» — пугает, MDM-территория. Слишком тяжело для пользы;
+  альтернативы (NSWorkspace + DispatchSource process events +
+  log stream) покрывают наши кейсы.
+* **Замена unix-socket IPC на XPC / Network framework.** ADR-0002
+  уже выбрал unix-socket. Reopen только если конкретный security-bug
+  всплывёт.
+* **`CGEventTap` для keyboard activity detection.** Глобальный
+  event-tap «слышит каждое нажатие» — privacy bomb. AX API +
+  `AXValueChangedNotification` даёт ту же информацию, не читая
+  каждый keystroke. Если AX мало — отдельный ADR с расширением
+  threat model, не дефолт.
+* **SwiftData / Core Data вместо SQLite3.** Replacing for
+  replacement's sake; миграции уже описаны.
+
 ## Долг ADR-нумерации
 
 * **Дубликат `0009-design-docs-after-implementation.md`** в
@@ -316,3 +377,23 @@ honest-stop паттерн, что и для memory/power baseline.
   `log collect --predicate 'subsystem == "com.froggychips.froggy"'
   --output froggy.logarchive` — для bug reports от будущих внешних
   пользователей. Без entitlement'ов, без кода.
+* **`NSWorkspace` notifications вместо polling в
+  `NSWorkspaceProcessFinder`.** Сейчас polling `runningApplications`;
+  заменить на подписку `didActivate` / `didDeactivate` /
+  `didTerminate`. Termination — критично: когда замороженный pid
+  убили извне, надо удалить из `FrozenPidsStore`, иначе хранится
+  мусор. Также: `willSleep` / `didWake` для gating'а freeze'ов
+  вокруг sleep cycle'а; `screensDidSleep`/`Wake` для SCStream
+  lifecycle. Один маленький PR, zero entitlement.
+* **`DispatchSource.makeProcessSource(.exit)` в `MLXSupervisor`.**
+  Заменяет polling `process.isRunning` (см. Mem-3.1 fix-debt).
+  Реактивный kernel signal на pid exit, закрывает race-условия
+  между polling и реальным exit'ом. Применить также к watcher'ам
+  frozen pid'ов там, где не покрывает NSWorkspace (non-app helpers,
+  Electron renderers).
+* **`OSSignposter` инструментация в hot paths.** Frame pipeline,
+  freeze cycle, MLX lifecycle (load/unload/generate), IPC roundtrip.
+  Делается **перед FCP-1** как dev-tool — Instruments → Points of
+  Interest визуализирует frame-budget, OCR latency, freeze-cycle
+  duration. Также для bench: `xctrace` profile вместо собственного
+  timing-кода. Аккуратно в hot paths, не везде.
