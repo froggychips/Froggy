@@ -22,9 +22,8 @@ out of scope.
 - A **readable codebase** for people learning Swift 6, MLX integration,
   ScreenCaptureKit, low-level macOS APIs (mach, jetsam, dispatch
   pressure sources), and ADR-driven design.
-- **Open source** for educational reference and contribution. (A
-  formal `LICENSE` file is on the to-do list — until then, treat the
-  code as source-available with all rights reserved by the author.)
+- **Open source under the [MIT License](../LICENSE)** — free to use,
+  modify, fork, and ship commercially, with attribution.
 
 ## What Froggy is NOT
 
