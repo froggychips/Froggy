@@ -100,25 +100,95 @@ public actor MLXSupervisor {
         throw MLXSupervisorError.workerCrashed
     }
 
-    /// Graceful shutdown: shutdown-команда → poll до 3 секунд → SIGKILL.
-    /// Ранее был хитрый withTaskGroup'овый wait через AsyncThrowingStream,
-    /// но stream без `goodbye` никогда не finish'ится, и ветка `for try
-    /// await` в group'е продолжала висеть после `cancelAll()`. Теперь —
-    /// прямой polling `process.isRunning`.
+    /// Graceful shutdown: shutdown-команда → ждём exit kernel-сигналом
+    /// до 3 секунд → SIGKILL.
+    ///
+    /// История: сначала был withTaskGroup'овый wait через AsyncThrowingStream
+    /// goodbye-event'а — но stream без `goodbye` никогда не finish'ится, и
+    /// ветка `for try await` в group'е продолжала висеть после `cancelAll()`.
+    /// Заменили на polling `process.isRunning` с шагом 100мс — работало, но
+    /// гонка: между `!p.isRunning` и `kill()` процесс мог зомбифицироваться,
+    /// или наоборот polling «промахивался» по короткоживущему окну, и мы
+    /// зря ждали до конца timeout'а. Теперь — `DispatchSource.makeProcessSource(.exit)`,
+    /// kernel-level kqueue NOTE_EXIT, без timer'ов и без race на чтении
+    /// `p.isRunning`.
     public func unloadModel() async {
         guard let p = process else { return }
         try? sendCommand(.init(cmd: MLXWorkerCommand.shutdown, requestId: UUID().uuidString))
 
-        // Ждём грациозного exit'а до 3 секунд (30 × 100мс).
-        for _ in 0..<30 {
-            if !p.isRunning { break }
-            try? await Task.sleep(for: .milliseconds(100))
-        }
-        if p.isRunning {
+        let exited = await Self.waitForExit(p, timeout: .seconds(3))
+        if !exited {
             kill(p.processIdentifier, SIGKILL)
-            p.waitUntilExit()
+            // SIGKILL гарантирован kernel'ом, но `waitUntilExit` нужен чтобы
+            // дождаться reaping zombie'я и termination handler'а Process'a.
+            await Self.waitForReap(p)
         }
         cleanup(reason: "unload")
+    }
+
+    /// Реактивное ожидание exit'а worker'а через `DispatchSource(.exit)`.
+    /// Возвращает `true` если процесс exit'нулся в пределах timeout'а,
+    /// `false` если timeout сработал раньше.
+    ///
+    /// Race-условие: процесс может exit'нуться между `proc.run()` и моментом
+    /// когда мы создаём DispatchSource — kqueue не доставит уже пропущенный
+    /// NOTE_EXIT. Закрываем явной проверкой `isRunning` после `activate()`.
+    /// Если уже не running — резолвим continuation сразу.
+    ///
+    /// Continuation вызывается ровно один раз — guard через `OneShotResolver`
+    /// (NSLock внутри), иначе и event-handler, и timeout-handler могут оба
+    /// попытаться резолвить.
+    private static func waitForExit(_ proc: Process, timeout: Duration) async -> Bool {
+        // Снимаем pid синхронно — `Process` не Sendable, в @Sendable handler'ы
+        // DispatchSource его передавать нельзя; pid (Int32) — Sendable.
+        let pid = proc.processIdentifier
+
+        // pid <= 0 — процесс не стартовал или уже reap'нут. Считаем, что exit'нулся.
+        guard pid > 0 else { return true }
+
+        return await withCheckedContinuation { (cont: CheckedContinuation<Bool, Never>) in
+            let resolver = OneShotResolver(continuation: cont)
+            let queue = DispatchQueue.global(qos: .userInitiated)
+
+            let src = DispatchSource.makeProcessSource(
+                identifier: pid,
+                eventMask: .exit,
+                queue: queue
+            )
+            src.setEventHandler {
+                src.cancel()
+                resolver.resolve(true)
+            }
+            src.activate()
+
+            // Race-guard: процесс мог exit'нуться до того, как kqueue его взял
+            // под наблюдение. NOTE_EXIT уже не придёт — проверяем вручную.
+            // `isRunning` тут безопасно: handler'ы ещё не escape'нули, мы в
+            // том же synchronous flow что и withCheckedContinuation closure.
+            if !proc.isRunning {
+                src.cancel()
+                resolver.resolve(true)
+                return
+            }
+
+            // Timeout: cancel'им source и резолвим false. resolver гарантирует,
+            // что если NOTE_EXIT уже сработал, мы не перезапишем результат.
+            let nanos = UInt64(timeout.components.seconds) * 1_000_000_000
+                + UInt64(timeout.components.attoseconds / 1_000_000_000)
+            queue.asyncAfter(deadline: .now() + .nanoseconds(Int(nanos))) {
+                src.cancel()
+                resolver.resolve(false)
+            }
+        }
+    }
+
+    /// После SIGKILL kernel убьёт процесс почти мгновенно, но `Process` ещё
+    /// не reap'нул zombie'я и не вызвал termination handler. Делаем второй
+    /// `waitForExit` без timeout-зависимости — pid точно exit'нется.
+    private static func waitForReap(_ proc: Process) async {
+        // SIGKILL → exit максимум за 1с, иначе что-то совсем сломано — но
+        // даже с timeout'ом cleanup'у безопасно продолжать (kill уже отправлен).
+        _ = await waitForExit(proc, timeout: .seconds(1))
     }
 
     public func isLoaded() -> Bool { loadedPath != nil }
@@ -207,7 +277,9 @@ public actor MLXSupervisor {
             bridge.receive(fh.availableData)
         }
         proc.terminationHandler = { p in
-            Task { [weak self] in await self?.handleWorkerExit(status: p.terminationStatus) }
+            let pid = p.processIdentifier
+            let status = p.terminationStatus
+            Task { [weak self] in await self?.handleWorkerExit(pid: pid, status: status) }
         }
         do {
             try proc.run()
@@ -270,8 +342,16 @@ public actor MLXSupervisor {
         }
     }
 
-    private func handleWorkerExit(status: Int32) async {
-        Self.log.warning("worker exited status=\(status)")
+    private func handleWorkerExit(pid: Int32, status: Int32) async {
+        // Race-guard: terminationHandler от старого процесса может прийти
+        // ПОСЛЕ того, как `unloadModel` уже сделал cleanup и `loadModel`
+        // успел spawn'нуть новый worker. В этом случае `process?.processIdentifier`
+        // — pid нового, и cleanup'ить его pendingRequests нельзя.
+        guard let currentPid = process?.processIdentifier, currentPid == pid else {
+            Self.log.notice("ignoring stale terminationHandler pid=\(pid) status=\(status)")
+            return
+        }
+        Self.log.warning("worker exited pid=\(pid) status=\(status)")
         cleanup(reason: "exit")
     }
 
@@ -299,4 +379,27 @@ private final class ReadBridge: @unchecked Sendable {
         self.callback = callback
     }
     func receive(_ data: Data) { callback(data) }
+}
+
+/// Гарантирует, что `CheckedContinuation` будет резолвлен ровно один раз.
+/// `DispatchSource(.exit)` event-handler и timeout-handler оба гонятся за
+/// resolve'ом — кто первый, тот и записывает результат. Двойной resume
+/// `CheckedContinuation` — это runtime-trap, поэтому guard обязателен.
+private final class OneShotResolver: @unchecked Sendable {
+    private let lock = NSLock()
+    private var resolved = false
+    private let continuation: CheckedContinuation<Bool, Never>
+
+    init(continuation: CheckedContinuation<Bool, Never>) {
+        self.continuation = continuation
+    }
+
+    func resolve(_ value: Bool) {
+        lock.lock()
+        let wasResolved = resolved
+        if !wasResolved { resolved = true }
+        lock.unlock()
+        guard !wasResolved else { return }
+        continuation.resume(returning: value)
+    }
 }
