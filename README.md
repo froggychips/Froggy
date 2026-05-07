@@ -22,6 +22,18 @@ daemon, so you can drive it from any language.
 **Status:** working personal-use scaffolding. Not a product. See
 [`docs/POSITIONING.md`](docs/POSITIONING.md) for what this is and isn't.
 
+> ⚠️ **Known issue (2026-05-07):** MLX inference is currently broken in
+> `swift build` release artifacts because `default.metallib` is missing —
+> SwiftPM does not compile Metal shaders by default, and `mlx-swift`
+> upstream's official answer is "use xcodebuild" (see
+> [mlx-swift#349](https://github.com/ml-explore/mlx-swift/issues/349)).
+> Substrate (memory orchestration, screen capture, IPC, freeze tier
+> system) works correctly — the daemon stays alive even when the worker
+> fails to load. See
+> [ADR-0013](docs/adr/0013-metallib-missing-in-swiftpm-release.md) for
+> fix paths. Tracked in
+> [PR #30](https://github.com/froggychips/Froggy/pull/30).
+
 📖 [THESIS](docs/THESIS.md) · [POSITIONING](docs/POSITIONING.md) · [ADRs](docs/adr/) · [Packaging](packaging/README.md)
 📬 Contact: [@froggychips](https://t.me/froggychips) on Telegram
 📜 License: [MIT](LICENSE)
