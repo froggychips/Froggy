@@ -109,7 +109,7 @@ public actor FrozenPidsStore {
                 [.posixPermissions: 0o600], ofItemAtPath: fileURL.path
             )
         } catch {
-            Self.log.error("failed to write frozen.pids: \(error.localizedDescription)")
+            Self.log.error("failed to write frozen.pids: \(error.localizedDescription, privacy: .private)")
         }
     }
 }
