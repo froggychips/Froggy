@@ -118,7 +118,7 @@ Mitigations are structural, not motivational:
 - **Design docs do not run ahead of implementation.** Forward-looking
   specification beyond the layer currently being built is its own
   flavour of gravity trap — see
-  [`docs/adr/0009-design-docs-after-implementation.md`](adr/0009-design-docs-after-implementation.md).
+  [`docs/adr/0014-design-docs-after-implementation.md`](adr/0014-design-docs-after-implementation.md).
   After a layer's design-docs are written, the next design-doc for a
   subsequent layer is gated on at least one implementation PR for the
   current layer landing in main.

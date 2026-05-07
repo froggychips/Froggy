@@ -23,3 +23,6 @@ Format: short — Status / Context / Decision / Consequences / Alternatives.
 * [0009 — KV-cache квантизация](0009-kv-cache-quantization.md)
 * [0010 — Profile-guided freeze ranking (этап 1: телеметрия)](0010-profile-guided-freeze.md)
 * [0011 — Уровень 2: код первым, design-doc вторым](0011-code-first-design-second-for-level-2.md)
+* [0012 — Signing-constraints (honest doc)](0012-signing-constraints-honest-doc.md)
+* [0013 — Metallib missing in SwiftPM release build](0013-metallib-missing-in-swiftpm-release.md)
+* [0014 — Design-doc'и не гонятся вперёд имплементации](0014-design-docs-after-implementation.md)

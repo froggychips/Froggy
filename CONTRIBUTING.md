@@ -39,7 +39,7 @@ welcome but evaluated against the thesis, not against general
    in `docs/design/` and merge it before the implementation PR. See
    `docs/design/activity-detection.md` for the format.
 4. **Mind the documentation/implementation order.** Per
-   [ADR 0009](docs/adr/0009-design-docs-after-implementation.md),
+   [ADR 0014](docs/adr/0014-design-docs-after-implementation.md),
    design-docs for layers beyond the one currently being built are
    declined by default — they create documentation gravity trap.
 
