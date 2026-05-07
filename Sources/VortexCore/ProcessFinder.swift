@@ -116,6 +116,10 @@ public actor ReactiveProcessFinder: ProcessFinder {
                 if byBundleId[bid]?.isEmpty == true { byBundleId.removeValue(forKey: bid) }
             }
             pidToBundleId.removeValue(forKey: pid)
+        case .frontmostChanged:
+            // Frontmost-смена — не меняет «кто бежит», только кто в фокусе.
+            // Это забота VortexCoordinator (frontmost-veto, ADR 0015).
+            break
         case .willSleep, .didWake, .screensDidSleep, .screensDidWake:
             // Не наша забота — на другом слое gating'и.
             break
