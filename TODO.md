@@ -354,8 +354,6 @@ honest-stop паттерн, что и для memory/power baseline.
 * `/simplify` на `MLXSupervisor.swift` + `FroggyMLXWorker/main.swift`
   после Worktree A — проверить, не подросло ли там лишнее с момента
   Mem-3.
-* CI workflow на Froggy всё ещё `startup_failure` (account-level
-  Actions activation у `froggychips`).
 * Hooks из `phase-mem/00-infra` (PR #15) активируются только в
   следующей сессии Claude Code — текущая их не подхватит.
 * Git committer email = `yaroslav@JabBook-Air-m3.local` (machine
