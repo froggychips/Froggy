@@ -39,18 +39,35 @@ to *try*, TCC controls whether the user lets you actually do it.
 For `FroggyMenuBar` repeat the same `codesign` invocation against
 `.build/arm64-apple-macosx/release/FroggyMenuBar`.
 
-### Pageout strategy `machVM` и `task_for_pid-allow`
+### Pageout strategy `machVM` и `task_for_pid-allow` — честная документация
 
 ADR 0007 описывает три стратегии pageout. Стратегия `machVM` использует
-`task_for_pid` + `mach_vm_behavior_set(VM_BEHAVIOR_PAGEOUT)` и требует
-**Apple Developer ID** подпись + provisioning profile с правом
-`com.apple.developer.task-for-pid-allow`. На простой dev-подписи это право
-не активируется — `task_for_pid` вернёт `KERN_FAILURE`, и `PageoutChain`
-автоматически откатится на `jetsam` (а затем `scratch`). Поведение
-безопасное по умолчанию: на dev-машине без Developer ID `pageoutStrategy=jetsam`
-работает сразу. Чтобы активировать `machVM`, нужно также прописать в
-provisioning profile `com.apple.developer.task-for-pid-allow=true` и
-выставить `"pageoutStrategy": "machVM"` в `config.json`.
+`task_for_pid` + `mach_vm_behavior_set(VM_BEHAVIOR_PAGEOUT)` и в
+**стандартной поставке третьему лицу не работает** на чужих процессах.
+Для активации требуется одно из двух:
+
+1. **`com.apple.developer.task-for-pid-allow` entitlement** в provisioning
+   profile, **выпущенном Apple для этого конкретного приложения**. Это
+   право не активируется ни простой dev-подписью, ни Developer ID +
+   notarization — нужно отдельно запрашивать у Apple через Apple Developer
+   Program. Для third-party tooling Apple **обычно отказывает**: это
+   право предполагается для отладочных утилит самого Apple и для
+   платформенных партнёров. Раньше существовавший `com.apple.security.cs.debugger`
+   entitlement из hardened runtime **не эквивалентен** `task-for-pid-allow`
+   — он позволяет attach'иться отладчиком, но `task_for_pid()` против
+   чужого процесса всё равно вернёт `KERN_FAILURE`. Прежняя редакция
+   этого README ошибочно их объединяла.
+2. **Отключённый SIP** (System Integrity Protection). На дев-машинах
+   делается через `csrutil disable` в Recovery — не для прода.
+
+В обоих случаях `pageoutStrategy=machVM` нужно явно прописать в
+`config.json`. Без этого `PageoutChain` автоматически откатывается на
+`jetsam` → `scratch` (см. ADR 0007). Дефолт `jetsam` работает с любой
+подписью (даже adhoc) и не требует никаких entitlement'ов.
+
+**TL;DR:** на стандартной поставке ставьте `pageoutStrategy=jetsam`
+(default). `machVM` — только если у вас одобренный Apple
+provisioning profile или вы у себя в dev-окружении с SIP off.
 
 ## 3. Notarize
 
