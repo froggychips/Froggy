@@ -28,6 +28,10 @@ public struct FroggyConfig: Codable, Sendable, Equatable {
     /// Размер scratch-буфера для `.scratch` стратегии и для fallback-цепочки.
     public var pageoutScratchMB: Int
 
+    /// Путь к executable'у `FroggyMLXWorker`. По умолчанию — рядом с демоном.
+    /// См. ADR 0008.
+    public var mlxWorkerPath: String?
+
     public var ipcSocketPath: String
     public var frameSimilarityThreshold: Double
     public var contextWindowSize: Int
@@ -49,6 +53,7 @@ public struct FroggyConfig: Codable, Sendable, Equatable {
         pressureCooldownSeconds: Int = 60,
         pageoutStrategy: PageoutStrategy = .jetsam,
         pageoutScratchMB: Int = 256,
+        mlxWorkerPath: String? = nil,
         ipcSocketPath: String = FroggyConfig.defaultSocketPath,
         frameSimilarityThreshold: Double = 0.98,
         contextWindowSize: Int = 30,
@@ -65,6 +70,7 @@ public struct FroggyConfig: Codable, Sendable, Equatable {
         self.pressureCooldownSeconds = pressureCooldownSeconds
         self.pageoutStrategy = pageoutStrategy
         self.pageoutScratchMB = pageoutScratchMB
+        self.mlxWorkerPath = mlxWorkerPath
         self.ipcSocketPath = ipcSocketPath
         self.frameSimilarityThreshold = frameSimilarityThreshold
         self.contextWindowSize = contextWindowSize
@@ -122,6 +128,7 @@ public struct FroggyConfig: Codable, Sendable, Equatable {
         self.pressureCooldownSeconds = try c.decodeIfPresent(Int.self, forKey: .pressureCooldownSeconds) ?? d.pressureCooldownSeconds
         self.pageoutStrategy = try c.decodeIfPresent(PageoutStrategy.self, forKey: .pageoutStrategy) ?? d.pageoutStrategy
         self.pageoutScratchMB = try c.decodeIfPresent(Int.self, forKey: .pageoutScratchMB) ?? d.pageoutScratchMB
+        self.mlxWorkerPath = try c.decodeIfPresent(String.self, forKey: .mlxWorkerPath)
 
         self.ipcSocketPath = try c.decodeIfPresent(String.self, forKey: .ipcSocketPath) ?? d.ipcSocketPath
         self.frameSimilarityThreshold = try c.decodeIfPresent(Double.self, forKey: .frameSimilarityThreshold) ?? d.frameSimilarityThreshold

@@ -40,7 +40,12 @@ struct FroggyDaemon {
             scratch: ScratchPageoutImpl(scratchMB: config.pageoutScratchMB)
         )
         let vortex = VortexActor(pidStore: pidStore, pageout: pageoutChain)
-        let mlx = MLXActor(memoryLimitBytes: config.gpuMemoryLimitBytes)
+        let workerURL = config.mlxWorkerPath.map { URL(fileURLWithPath: $0) }
+        let mlx = MLXSupervisor(
+            memoryLimitBytes: config.gpuMemoryLimitBytes,
+            workerExecutableURL: workerURL,
+            pidStore: pidStore
+        )
         let pressureSource: any MemoryPressureSource = DispatchMemoryPressureSource()
         let monitor = MemoryPressureMonitor(
             source: pressureSource,
