@@ -10,7 +10,15 @@ import Vision
 public actor VisionActor {
     private static let log = Logger(subsystem: "com.froggychips.froggy", category: "vision")
     private static let signposter = OSSignposter(subsystem: "com.froggychips.froggy", category: "vision")
+    /// Отдельный signposter в категории `PointsOfInterest` — Instruments
+    /// автоматически визуализирует это в одноимённом track'е без ручного
+    /// `.instrpkg`. Используется для frame-budget overlay'я при profile'е.
+    /// Dev-tool, не меняет behaviour в release-сборке.
+    private static let poi = OSSignposter(subsystem: "com.froggychips.froggy", category: "PointsOfInterest")
     private static let isoStyle = Date.ISO8601FormatStyle(includingFractionalSeconds: true)
+    /// Монотонный счётчик кадров — попадает в metadata signpost'а как
+    /// `frame_id=…`, чтобы в Instruments было видно конкретный цикл.
+    private var frameCounter: UInt64 = 0
 
     private var isCapturing = false
     private var lastDigest: FrameDigest?
@@ -99,8 +107,26 @@ public actor VisionActor {
         let interval = Self.signposter.beginInterval("captureCycle")
         defer { Self.signposter.endInterval("captureCycle", interval) }
 
+        // POI-уровень: один interval на весь pipeline (capture → digest →
+        // ocr → redact → ContextStore.append). В Instruments → Points of
+        // Interest сразу виден frame-budget per кадр.
+        frameCounter &+= 1
+        let frameId = frameCounter
+        let poiId = Self.poi.makeSignpostID()
+        let poiState = Self.poi.beginInterval("frame_pipeline", id: poiId, "frame_id=\(frameId)")
+        var ocrChars = 0
+        var skipped = false
+        defer {
+            Self.poi.endInterval(
+                "frame_pipeline",
+                poiState,
+                "frame_id=\(frameId) ocr_chars=\(ocrChars) skipped=\(skipped ? 1 : 0)"
+            )
+        }
+
         guard let box = await screenStream.latestFrame() else {
             // ещё не пришёл первый кадр (или TCC denied). Просто ждём.
+            skipped = true
             return
         }
         let image = box.image
@@ -111,6 +137,7 @@ public actor VisionActor {
                digest.similarity(to: prev) >= frameSimilarityThreshold
             {
                 Self.signposter.emitEvent("frameSkipped", id: .exclusive)
+                skipped = true
                 return
             }
             lastDigest = digest
@@ -118,6 +145,7 @@ public actor VisionActor {
 
         let strings = await Self.recognizeText(image: image)
         let redacted = redactor.redact(strings)
+        ocrChars = redacted.reduce(0) { $0 + $1.count }
         await writeState(strings: redacted)
         await contextStore?.push(lines: redacted)
     }
