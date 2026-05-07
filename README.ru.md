@@ -10,6 +10,20 @@
 К демону прилагается menubar-приложение (SwiftUI `MenuBarExtra`) и Unix-socket
 IPC, через который можно дёргать его из любого языка.
 
+**Статус:** working personal-use scaffolding, не продукт. См.
+[`docs/POSITIONING.md`](docs/POSITIONING.md).
+
+> ⚠️ **Known issue (2026-05-07):** MLX inference сейчас сломан в release-сборке
+> через `swift build` — `default.metallib` отсутствует, SwiftPM не
+> компилирует Metal-shader'ы по умолчанию, и upstream `mlx-swift` явно
+> отвечает «используйте xcodebuild» (см.
+> [mlx-swift#349](https://github.com/ml-explore/mlx-swift/issues/349)).
+> Substrate (memory orchestration, screen capture, IPC, freeze-тиры)
+> работает корректно — демон не падает, когда worker не может загрузиться.
+> Пути решения — в
+> [ADR-0013](docs/adr/0013-metallib-missing-in-swiftpm-release.md).
+> Tracking — [PR #30](https://github.com/froggychips/Froggy/pull/30).
+
 📖 [THESIS](docs/THESIS.md) · [POSITIONING](docs/POSITIONING.md) · [ADR'ы](docs/adr/) · [Packaging](packaging/README.md)
 📬 Контакт: [@froggychips](https://t.me/froggychips) в Telegram
 📜 Лицензия: [MIT](LICENSE)
