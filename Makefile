@@ -3,7 +3,7 @@
 # Без этого pre-build шага FroggyMLXWorker не может загрузить
 # ни одной MLX-модели в release-сборке через SwiftPM.
 
-.PHONY: build build-debug release test resolve metallib clean help
+.PHONY: build build-debug release test resolve metallib logbundle clean help
 
 # Default target: release build.
 build: release
@@ -34,6 +34,13 @@ metallib: resolve
 resolve:
 	swift package resolve
 
+# Собирает unified-log архив для bug-report'а. Передавать аргументы в
+# make неудобно (они интерпретируются как targets), поэтому здесь
+# вызов «по дефолту» — `./froggy.logarchive` на весь boot. Для
+# `--last 1h` или `-o <path>` запускать `scripts/logbundle.sh` напрямую.
+logbundle:
+	scripts/logbundle.sh
+
 clean:
 	swift package clean
 	rm -rf .build/metallib-work
@@ -44,4 +51,5 @@ help:
 	@echo "make build-debug   — debug build + post-build metallib copy"
 	@echo "make test          — swift test (нужен metallib для MLX-смок-тестов)"
 	@echo "make metallib      — только пересобрать default.metallib"
+	@echo "make logbundle     — собрать froggy.logarchive для bug-report'а"
 	@echo "make clean         — clean всё, включая metallib"
