@@ -7,7 +7,12 @@ import os
 /// при `.warning`, Tier-2 — при `.critical`, оттепель — постепенно при
 /// устойчивом `.normal`. `loadModel` теперь делает виртуальный nudge
 /// в монитор: сам триггерит warning, реагируем общим путём.
-public actor VortexCoordinator {
+///
+/// Workspace-events: опционально подписывается на `WorkspaceEventSource`,
+/// чтобы (а) gating'ить freeze-loop вокруг sleep/wake (см. `applyPolicy`),
+/// (б) обрабатывать `appTerminated` через `WorkspaceTerminationWatcher.Sink`
+/// — убирать pid из in-memory tier-set'ов когда процесс убили извне.
+public actor VortexCoordinator: WorkspaceTerminationWatcher.Sink {
     private static let log = Logger(subsystem: "com.froggychips.froggy", category: "coordinator")
     private static let signposter = OSSignposter(subsystem: "com.froggychips.froggy", category: "coordinator")
 
@@ -16,6 +21,7 @@ public actor VortexCoordinator {
     public let monitor: MemoryPressureMonitor
 
     private let finder: any ProcessFinder
+    private let workspaceSource: (any WorkspaceEventSource)?
     private let tier1BundleIds: [String]
     private let tier2BundleIds: [String]
     /// Через сколько секунд после оттепели tier-2 размораживать tier-1.
@@ -24,7 +30,14 @@ public actor VortexCoordinator {
     private var tier1Frozen: Set<Int32> = []
     private var tier2Frozen: Set<Int32> = []
     private var listenTask: Task<Void, Never>?
+    private var workspaceTask: Task<Void, Never>?
     private var thawTask: Task<Void, Never>?
+
+    /// Sleep-gate: пока true, `applyPolicy` не делает новых freeze'ов.
+    /// На `willSleep` мы ещё успеваем выполнить emergencyThaw — на wake
+    /// MemoryPressureMonitor сам пере-эмитит свой текущий уровень при
+    /// первом изменении, поэтому ничего форсировать не нужно.
+    private var sleeping: Bool = false
 
     public init(
         mlx: MLXSupervisor,
@@ -33,6 +46,7 @@ public actor VortexCoordinator {
         tier1BundleIds: [String],
         tier2BundleIds: [String],
         finder: any ProcessFinder = NSWorkspaceProcessFinder(),
+        workspaceSource: (any WorkspaceEventSource)? = nil,
         gradualThawDelaySeconds: TimeInterval = 10
     ) {
         self.mlx = mlx
@@ -41,6 +55,7 @@ public actor VortexCoordinator {
         self.tier1BundleIds = tier1BundleIds
         self.tier2BundleIds = tier2BundleIds
         self.finder = finder
+        self.workspaceSource = workspaceSource
         self.gradualThawDelaySeconds = gradualThawDelaySeconds
     }
 
@@ -55,11 +70,22 @@ public actor VortexCoordinator {
                 await self?.applyPolicy(level)
             }
         }
+        // Sleep/wake gating — отдельный task, чтобы не путать с pressure-loop'ом.
+        if let workspaceSource {
+            let wsStream = workspaceSource.events()
+            workspaceTask = Task { [weak self] in
+                for await event in wsStream {
+                    await self?.applyWorkspaceEvent(event)
+                }
+            }
+        }
     }
 
     public func stopMonitoring() async {
         listenTask?.cancel()
         listenTask = nil
+        workspaceTask?.cancel()
+        workspaceTask = nil
         thawTask?.cancel()
         thawTask = nil
         await monitor.stop()
@@ -126,9 +152,55 @@ public actor VortexCoordinator {
         public let pageoutCounters: PageoutCounters?
     }
 
+    // MARK: - WorkspaceTerminationWatcher.Sink
+
+    /// Pid убили извне (Activity Monitor, OOM-kill, ручной `kill -9`,
+    /// jetsam). Watcher уже почистил `FrozenPidsStore`; нам остаётся
+    /// убрать pid из in-memory tier-set'ов, чтобы snapshot не показывал
+    /// zombie-pid'ы и `thawTier` не звала `kill(SIGCONT)` мёртвому pid'у
+    /// (это ESRCH — безвредно, но шумит в логах).
+    public func handleExternalTermination(pid: Int32) async {
+        let inT1 = tier1Frozen.remove(pid) != nil
+        let inT2 = tier2Frozen.remove(pid) != nil
+        if inT1 || inT2 {
+            Self.log.notice("frozen pid=\(pid, privacy: .public) terminated externally — removed from tier-set")
+        }
+    }
+
     // MARK: - Policy
 
+    private func applyWorkspaceEvent(_ event: WorkspaceEvent) async {
+        switch event {
+        case .willSleep:
+            // Перед sleep'ом — мгновенно отпустить всё. После wake watchdog'и
+            // не любят полу-мёртвых SIGSTOP-нутых процессов: они могут
+            // получить SIGKILL от ApplePersistence и прочих, что превратит
+            // нашу backstop-cleanup'у в гонку.
+            Self.log.notice("system will sleep — emergency thaw")
+            sleeping = true
+            await emergencyThaw()
+        case .didWake:
+            // На wake пресс-monitor сам пере-эмитит уровень при следующем
+            // изменении ядра. Просто снимаем gate.
+            Self.log.notice("system did wake — freeze loop ungated")
+            sleeping = false
+        default:
+            // Activate/deactivate/terminate/screen-events — не наша забота
+            // на этом слое (terminate ловит WorkspaceTerminationWatcher,
+            // screen-события — VisionActor).
+            break
+        }
+    }
+
     private func applyPolicy(_ level: MemoryPressureLevel) async {
+        // Sleep-gate: во время sleep'а ничего не морозим. Pressure-эвенты
+        // в это время не должны прилетать (CPU всё равно спит), но на
+        // всякий случай явно дропаем — в момент willSleep мы уже сделали
+        // emergencyThaw, восстанавливать состояние сейчас бессмысленно.
+        if sleeping {
+            Self.log.info("policy event ignored: system is sleeping (level=\(level.rawValue, privacy: .public))")
+            return
+        }
         switch level {
         case .warning:
             thawTask?.cancel(); thawTask = nil
