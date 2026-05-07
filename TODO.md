@@ -4,9 +4,31 @@
 рефакторим». Если из этого списка что-то всплыло во время работы над
 другой задачей, не трогаем здесь и сейчас.
 
+## Validation gate (блокирует всё)
+
+**Прежде чем браться за AD-1 / FCP-1 / EXP-1 / Уровень 2 — снять
+baseline.** См. ADR 0011.
+
+```sh
+/froggy-bench --save  # idle
+# загрузить модель
+/froggy-bench --save  # model-loaded
+# открыть YouTube + Xcode build чтобы поймать .warning/.critical
+/froggy-bench --save  # under-pressure
+git add bench/baseline.json && git commit -m "bench: baseline до Уровня 1.5"
+```
+
+После — прочитать цифры honest. Если pageout-counters показывают
+`succeeded = 0` под jetsam, или `secondsInLevel`-распределение под
+реальной нагрузкой не выходит за `.normal` ни разу — **остановиться
+и разобраться с substrate**, не идти дальше.
+
 ## Долги, идущие следом
 
-### Mem-3.1 + Mem-4 (Worktree A)
+### Mem-3.1 + Mem-4 (Worktree A) — закрыто (#26)
+
+### Mem-3.1 + Mem-4 (Worktree A) — было
+
 * `phase-mem/A-worker-tests-kvcache` уже залит локально, но swift test
   на момент коммита Mem-5 завис на `testShutdownTimeoutForcesSIGKILL`
   с предыдущей buggy версией `unloadModel`. После убийства зависших
@@ -17,6 +39,23 @@
   - запушить, открыть PR, мерджить
 * Контракт PR'а: один общий — `Mem-3.1 fake worker + Mem-4 KV-cache`,
   как описано в новом плане Уровня 1.
+
+### Уровень 1.5 (после baseline-bench)
+
+Когда `bench/baseline.json` в main и цифры разумны:
+
+* **AD-1 — frontmost-veto.** `VortexCoordinator` не морозит pid
+  frontmost-app, даже если bundleId в `freezeTier1BundleIds`. Закрывает
+  embarassing failure mode «freeze посередине набора текста».
+* **FCP-1 — frame-cycle pacing.** `VisionActor` отбрасывает frame'ы из
+  `SCStream`, пришедшие раньше `1 / captureIntervalSeconds`. Сейчас
+  pacing внешний (Task.sleep между cycles); нужен внутренний.
+* **EXP-1 — experimental accessors.** Отдельный target/протокол, в
+  котором регистрируется аксессор с маркером `experimental: true` без
+  правки `main.swift`. Отдельная IPC-команда.
+
+Все три — маленькие PR. После их merge'a в main — **только тогда**
+открывается дизайн-этап Уровня 2 (см. ADR 0011).
 
 ### Mem-5 этап 2: ranking-overlay
 Активировать через ~неделю после включения телеметрии у пользователя.
@@ -45,8 +84,10 @@ benchmark без живого FroggyDaemon + загруженной модели
 frontmost-приложений. Делается пользователем после merge всех Mem-серии,
 до того как браться за overlay (Mem-5 этап 2) или Уровень 2.
 
-## Уровень 2 (намеренно вне этой серии)
-Не трогаем без отдельного запроса:
+## Уровень 2 — заблокирован до AD-1 + FCP-1 + EXP-1 в main
+
+См. ADR 0011 (он же «ADR-0009» в внешних заметках). Не трогаем design,
+не открываем target'ы под voice/VLM, пока Уровень 1.5 не в main:
 * ROI OCR — запускать Vision только на изменившихся прямоугольниках,
   а не на всём кадре.
 * Downscale в `SCStream` на стороне ядра (не в нашем CIContext).
