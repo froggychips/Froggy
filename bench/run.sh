@@ -74,7 +74,7 @@ case "$froggy_pressure_raw" in
   *'"pressureLevel":"warning"'*)  scenario="under-pressure";;
 esac
 case "$froggy_status_raw" in
-  *modelLoaded*yes*) [ "$scenario" = "idle" ] && scenario="model-loaded";;
+  *"model_loaded     yes"*) [ "$scenario" = "idle" ] && scenario="model-loaded";;
 esac
 
 # 5. Time-to-first-token (если модель загружена)
