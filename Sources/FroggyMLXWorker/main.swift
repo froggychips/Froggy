@@ -18,19 +18,44 @@ struct FroggyMLXWorker {
         let log = Logger(subsystem: "com.froggychips.froggy.worker", category: "worker")
         log.notice("worker started pid=\(getpid())")
 
-        let runtime = WorkerRuntime(log: log)
+        let cli = CLIFlags.parse(CommandLine.arguments)
+        let runtime = WorkerRuntime(log: log, defaultKVBits: cli.kvBits)
         await runtime.run()
+    }
+}
+
+struct CLIFlags {
+    var kvBits: Int? = nil
+
+    static func parse(_ argv: [String]) -> CLIFlags {
+        var out = CLIFlags()
+        var i = 1
+        while i < argv.count {
+            let a = argv[i]
+            switch a {
+            case "--kv-bits":
+                if i + 1 < argv.count, let v = Int(argv[i + 1]) {
+                    out.kvBits = (v == 16) ? nil : v // 16 → без квантизации
+                }
+                i += 2
+            default:
+                i += 1
+            }
+        }
+        return out
     }
 }
 
 actor WorkerRuntime {
     private let log: Logger
+    private let defaultKVBits: Int?
     private var container: ModelContainer?
     private var loadedPath: String?
     private var memoryLimitApplied = false
 
-    init(log: Logger) {
+    init(log: Logger, defaultKVBits: Int? = nil) {
         self.log = log
+        self.defaultKVBits = defaultKVBits
     }
 
     func run() async {
@@ -123,10 +148,16 @@ actor WorkerRuntime {
         }
         let maxTokens = cmd.maxTokens ?? 200
         let temperature = Float(cmd.temperature ?? 0.7)
+        // KV-cache: per-request override → CLI default → nil (без квантизации)
+        let kvBits: Int? = (cmd.kvBits.map { $0 == 16 ? nil : $0 }) ?? defaultKVBits
 
         do {
             let lmInput = try await container.prepare(input: UserInput(prompt: .text(prompt)))
-            let params = GenerateParameters(maxTokens: maxTokens, temperature: temperature)
+            let params = GenerateParameters(
+                maxTokens: maxTokens,
+                kvBits: kvBits,
+                temperature: temperature
+            )
             let stream = try await container.generate(input: lmInput, parameters: params)
             for await event in stream {
                 if case let .chunk(text) = event {

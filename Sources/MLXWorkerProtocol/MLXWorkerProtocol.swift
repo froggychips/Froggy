@@ -7,6 +7,10 @@ public struct MLXWorkerCommand: Codable, Sendable {
     public var prompt: String?
     public var maxTokens: Int?
     public var temperature: Double?
+    /// Биты KV-cache квантизации: 16 (без квантизации), 8, 4. Передаётся
+    /// также CLI-флагом `--kv-bits`, и команда per-request переопределяет
+    /// дефолт worker'a.
+    public var kvBits: Int?
     public var requestId: String?
 
     public init(
@@ -15,6 +19,7 @@ public struct MLXWorkerCommand: Codable, Sendable {
         prompt: String? = nil,
         maxTokens: Int? = nil,
         temperature: Double? = nil,
+        kvBits: Int? = nil,
         requestId: String? = nil
     ) {
         self.cmd = cmd
@@ -22,6 +27,7 @@ public struct MLXWorkerCommand: Codable, Sendable {
         self.prompt = prompt
         self.maxTokens = maxTokens
         self.temperature = temperature
+        self.kvBits = kvBits
         self.requestId = requestId
     }
 

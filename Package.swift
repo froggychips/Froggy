@@ -51,6 +51,12 @@ let package = Package(
             ],
             swiftSettings: strictConcurrency
         ),
+        // Тестовый-двойник без MLX — для интеграционных тестов supervisor'a.
+        .executableTarget(
+            name: "FroggyMLXWorkerFake",
+            dependencies: ["MLXWorkerProtocol"],
+            swiftSettings: strictConcurrency
+        ),
         // Общий протокол wire-формата — ни демон, ни worker не должны
         // знать друг о друге; оба знают про этот target.
         .target(

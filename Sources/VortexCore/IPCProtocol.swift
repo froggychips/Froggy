@@ -45,6 +45,8 @@ public struct IPCResponse: Codable, Sendable {
     public var lines: [String]?
     public var accessors: [Accessor]?
     public var lastCaptureError: String?
+    /// Текущее значение KV-cache битности (16/8/4) — для cmd `status`.
+    public var kvCacheBits: Int?
     /// Текущий уровень давления (`normal`/`warning`/`critical`) — для cmd `pressure`.
     public var pressureLevel: String?
     /// Pids, замороженные политикой tier-1 (warning).

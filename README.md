@@ -60,6 +60,10 @@ daemon, so you can drive it from any language.
   return peak unified memory to the kernel. The daemon weighs ~50 MB
   without a model loaded, not ~500 MB. See
   `docs/adr/0008-mlx-subprocess-isolation.md`.
+- **KV-cache quantization** — `kvCacheBits` (16/8/4, default 8) cuts
+  KV-cache memory roughly in half on long prompts. Forwarded to the
+  worker via `--kv-bits`; current value exposed in IPC `status`. See
+  `docs/adr/0009-kv-cache-quantization.md`.
 - **Streaming MLX inference** — tokens are pushed to the IPC client as
   they're generated.
 - **`os_signpost`** — markers on hot paths for Instruments.
@@ -163,6 +167,7 @@ All fields are optional and have defaults:
   "pageoutStrategy": "jetsam",
   "pageoutScratchMB": 256,
   "mlxWorkerPath": "/usr/local/libexec/FroggyMLXWorker",
+  "kvCacheBits": 8,
   "ipcSocketPath": "/Users/me/Library/Application Support/Froggy/froggy.sock",
   "frameSimilarityThreshold": 0.98,
   "contextWindowSize": 30,

@@ -32,6 +32,11 @@ public struct FroggyConfig: Codable, Sendable, Equatable {
     /// См. ADR 0008.
     public var mlxWorkerPath: String?
 
+    /// Биты KV-cache в worker'е: 16 (без квантизации), 8 (default), 4.
+    /// Значение `8` экономит ~50% RAM на KV-cache на больших prompt'ах.
+    /// См. ADR 0009.
+    public var kvCacheBits: Int
+
     public var ipcSocketPath: String
     public var frameSimilarityThreshold: Double
     public var contextWindowSize: Int
@@ -54,6 +59,7 @@ public struct FroggyConfig: Codable, Sendable, Equatable {
         pageoutStrategy: PageoutStrategy = .jetsam,
         pageoutScratchMB: Int = 256,
         mlxWorkerPath: String? = nil,
+        kvCacheBits: Int = 8,
         ipcSocketPath: String = FroggyConfig.defaultSocketPath,
         frameSimilarityThreshold: Double = 0.98,
         contextWindowSize: Int = 30,
@@ -71,6 +77,7 @@ public struct FroggyConfig: Codable, Sendable, Equatable {
         self.pageoutStrategy = pageoutStrategy
         self.pageoutScratchMB = pageoutScratchMB
         self.mlxWorkerPath = mlxWorkerPath
+        self.kvCacheBits = kvCacheBits
         self.ipcSocketPath = ipcSocketPath
         self.frameSimilarityThreshold = frameSimilarityThreshold
         self.contextWindowSize = contextWindowSize
@@ -129,6 +136,7 @@ public struct FroggyConfig: Codable, Sendable, Equatable {
         self.pageoutStrategy = try c.decodeIfPresent(PageoutStrategy.self, forKey: .pageoutStrategy) ?? d.pageoutStrategy
         self.pageoutScratchMB = try c.decodeIfPresent(Int.self, forKey: .pageoutScratchMB) ?? d.pageoutScratchMB
         self.mlxWorkerPath = try c.decodeIfPresent(String.self, forKey: .mlxWorkerPath)
+        self.kvCacheBits = try c.decodeIfPresent(Int.self, forKey: .kvCacheBits) ?? d.kvCacheBits
 
         self.ipcSocketPath = try c.decodeIfPresent(String.self, forKey: .ipcSocketPath) ?? d.ipcSocketPath
         self.frameSimilarityThreshold = try c.decodeIfPresent(Double.self, forKey: .frameSimilarityThreshold) ?? d.frameSimilarityThreshold

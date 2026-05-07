@@ -20,3 +20,4 @@ Format: short — Status / Context / Decision / Consequences / Alternatives.
 * [0006 — Реактивный memory pressure handler](0006-reactive-memory-pressure.md)
 * [0007 — Pageout-стратегии: machVM / jetsam / scratch](0007-pageout-strategies.md)
 * [0008 — MLX-инференс в отдельном процессе](0008-mlx-subprocess-isolation.md)
+* [0009 — KV-cache квантизация](0009-kv-cache-quantization.md)

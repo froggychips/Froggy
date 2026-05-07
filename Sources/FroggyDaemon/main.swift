@@ -44,7 +44,8 @@ struct FroggyDaemon {
         let mlx = MLXSupervisor(
             memoryLimitBytes: config.gpuMemoryLimitBytes,
             workerExecutableURL: workerURL,
-            pidStore: pidStore
+            pidStore: pidStore,
+            kvCacheBits: config.kvCacheBits
         )
         let pressureSource: any MemoryPressureSource = DispatchMemoryPressureSource()
         let monitor = MemoryPressureMonitor(
@@ -188,6 +189,7 @@ struct DaemonIPCHandler: IPCRequestHandler, Sendable {
             r.frozen = await vortex.suspendedCount()
             r.snapshots = await contextStore.count()
             r.lastCaptureError = await vision.lastCaptureError()
+            r.kvCacheBits = await coordinator.mlx.currentKVCacheBits()
             r.final = true
             return r
 
