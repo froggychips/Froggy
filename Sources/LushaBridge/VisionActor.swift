@@ -68,7 +68,7 @@ public actor VisionActor {
         do {
             try await screenStream.start(frameRateHz: frameRateHz)
         } catch {
-            Self.log.error("screen stream failed to start: \(error.localizedDescription)")
+            Self.log.error("screen stream failed to start: \(error.localizedDescription, privacy: .private)")
             isCapturing = false
             return
         }
@@ -171,7 +171,7 @@ public actor VisionActor {
             do {
                 try handler.perform([request])
             } catch {
-                log.error("vision request failed: \(error.localizedDescription)")
+                log.error("vision request failed: \(error.localizedDescription, privacy: .private)")
                 continuation.resume(returning: [])
             }
         }
@@ -196,7 +196,7 @@ public actor VisionActor {
                 ofItemAtPath: stateFilePath.path
             )
         } catch {
-            Self.log.error("state write failed: \(error.localizedDescription)")
+            Self.log.error("state write failed: \(error.localizedDescription, privacy: .private)")
         }
     }
 }
