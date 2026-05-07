@@ -285,6 +285,7 @@ struct DaemonIPCHandler: IPCRequestHandler, Sendable {
             r.tier1Frozen = snap.tier1Frozen
             r.tier2Frozen = snap.tier2Frozen
             r.secondsInLevel = snap.secondsInLevel
+            r.pageoutCounters = snap.pageoutCounters
             r.final = true
             return r
 

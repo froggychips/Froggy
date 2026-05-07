@@ -108,11 +108,13 @@ public actor VortexCoordinator {
     public func pressureSnapshot() async -> PressureSnapshot {
         let level = await monitor.currentLevel()
         let secs = await monitor.secondsInLevel()
+        let counters = await vortex.pageoutCounters()
         return PressureSnapshot(
             level: level,
             tier1Frozen: Array(tier1Frozen).sorted(),
             tier2Frozen: Array(tier2Frozen).sorted(),
-            secondsInLevel: secs
+            secondsInLevel: secs,
+            pageoutCounters: counters
         )
     }
 
@@ -121,6 +123,7 @@ public actor VortexCoordinator {
         public let tier1Frozen: [Int32]
         public let tier2Frozen: [Int32]
         public let secondsInLevel: Int
+        public let pageoutCounters: PageoutCounters?
     }
 
     // MARK: - Policy

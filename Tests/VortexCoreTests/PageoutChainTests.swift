@@ -3,6 +3,53 @@ import XCTest
 @testable import VortexCore
 
 final class PageoutChainTests: XCTestCase {
+    /// Счётчики bump-ятся правильно: успех на первой стратегии = +1 attempted/+1 succeeded.
+    func testCountersTrackSuccess() async {
+        let chain = PageoutChain(
+            preferred: .jetsam,
+            machVM: FakePageoutImpl { _ in .failed(reason: "x") },
+            jetsam: FakePageoutImpl { _ in .success(strategyUsed: .jetsam) },
+            scratch: FakePageoutImpl { _ in .success(strategyUsed: .scratch) }
+        )
+        _ = await chain.pageout(pid: 1234)
+        let c = await chain.currentCounters()
+        XCTAssertEqual(c.jetsamAttempted, 1)
+        XCTAssertEqual(c.jetsamSucceeded, 1)
+        XCTAssertEqual(c.jetsamFailed, 0)
+        // machVM пропустили (preferred=jetsam) — должны быть нулями.
+        XCTAssertEqual(c.machVMAttempted, 0)
+    }
+
+    /// Fallback chain: jetsam падает → scratch успешно. Счётчики обоих ненулевые.
+    func testCountersTrackFallback() async {
+        let chain = PageoutChain(
+            preferred: .jetsam,
+            machVM: FakePageoutImpl { _ in .success(strategyUsed: .machVM) },
+            jetsam: FakePageoutImpl { _ in .failed(reason: "EPERM") },
+            scratch: FakePageoutImpl { _ in .success(strategyUsed: .scratch) }
+        )
+        _ = await chain.pageout(pid: 1234)
+        let c = await chain.currentCounters()
+        XCTAssertEqual(c.jetsamAttempted, 1)
+        XCTAssertEqual(c.jetsamFailed, 1)
+        XCTAssertEqual(c.scratchAttempted, 1)
+        XCTAssertEqual(c.scratchSucceeded, 1)
+    }
+
+    /// Счётчики кумулятивны — несколько pageout добавляются друг к другу.
+    func testCountersAccumulate() async {
+        let chain = PageoutChain(
+            preferred: .jetsam,
+            machVM: FakePageoutImpl { _ in .failed(reason: "x") },
+            jetsam: FakePageoutImpl { _ in .success(strategyUsed: .jetsam) },
+            scratch: FakePageoutImpl { _ in .success(strategyUsed: .scratch) }
+        )
+        for _ in 0..<3 { _ = await chain.pageout(pid: 1234) }
+        let c = await chain.currentCounters()
+        XCTAssertEqual(c.jetsamAttempted, 3)
+        XCTAssertEqual(c.jetsamSucceeded, 3)
+    }
+
     func testJetsamPreferredSucceeds() async {
         let chain = PageoutChain(
             preferred: .jetsam,
