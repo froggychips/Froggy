@@ -22,3 +22,4 @@ Format: short — Status / Context / Decision / Consequences / Alternatives.
 * [0008 — MLX-инференс в отдельном процессе](0008-mlx-subprocess-isolation.md)
 * [0009 — KV-cache квантизация](0009-kv-cache-quantization.md)
 * [0010 — Profile-guided freeze ranking (этап 1: телеметрия)](0010-profile-guided-freeze.md)
+* [0011 — Уровень 2: код первым, design-doc вторым](0011-code-first-design-second-for-level-2.md)
