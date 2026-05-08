@@ -13,6 +13,13 @@ struct FroggyDaemon {
     static func main() async {
         log.info("🐸 Froggy Daemon v0.4.0 starting")
 
+        // SIGPIPE → SIG_IGN. IPC writes на закрытый client socket (клиент
+        // crash'нулся посреди streaming response'а) иначе шлют SIGPIPE и
+        // **убивают daemon с exit 141**. Один плохой client кладёт сервис.
+        // Игнор SIGPIPE здесь означает: write возвращает EPIPE, IPC server
+        // обрабатывает per-connection, daemon живёт. Bug-2.
+        signal(SIGPIPE, SIG_IGN)
+
         let cli: CLIArgs
         do {
             cli = try CLIArgs.parse(arguments: CommandLine.arguments)

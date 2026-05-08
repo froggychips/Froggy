@@ -35,6 +35,19 @@ private struct StubFinder: ProcessFinder {
     }
 }
 
+/// Mutable variant — для тестов где pid появляется во время сессии
+/// (новый app запущен post-startup'ом).
+private actor MutableStubFinder: ProcessFinder {
+    private var mapping: [String: [Int32]]
+    init(_ initial: [String: [Int32]]) { self.mapping = initial }
+    func add(bundleId: String, pid: Int32) {
+        mapping[bundleId, default: []].append(pid)
+    }
+    func pids(forBundleIds bundleIds: [String]) async -> [Int32] {
+        bundleIds.flatMap { mapping[$0] ?? [] }
+    }
+}
+
 final class VortexCoordinatorWorkspaceTests: XCTestCase {
     private func makeCoordinator(
         workspaceSource: any WorkspaceEventSource,
@@ -172,6 +185,142 @@ final class VortexCoordinatorWorkspaceTests: XCTestCase {
                        "pid 1001 не должен оставаться в tier1Frozen")
 
         await watcher.stop()
+        await coord.stopMonitoring()
+    }
+
+    // MARK: - Bug-3: app-activate под sustained pressure
+
+    /// **Regression test для Bug-3.** Когда pressure держится на `.critical`
+    /// и пользователь запускает новый tier-1 app — этот app должен попасть
+    /// под freeze без ожидания следующего pressure level change. До fix'а
+    /// `applyWorkspaceEvent` обрабатывал только `.frontmostChanged`,
+    /// `.appActivated` шёл в `default: break`, freeze никогда не fired
+    /// для post-launch'нутого pid'а.
+    ///
+    /// Сценарий из живой сессии 2026-05-08:
+    /// 1. pressure=.critical с 09:27:17 (`secondsInLevel: 3032`)
+    /// 2. Telegram (tier-1) запущен ~09:50 — после первого freeze cycle'а
+    /// 3. Должен быть заморожен немедленно, не дожидаясь pressure level
+    ///    transition (которого не будет — pressure стабилен)
+    func testAppActivatedTriggersFreezeUnderSustainedCritical() async throws {
+        let pressureSrc = FakeMemoryPressureSource()
+        let monitor = MemoryPressureMonitor(source: pressureSrc, cooldownSeconds: 0.5)
+        let stub = StubVortex()
+        // Изначально tier1.app пуст — стартовый seed без tier-1 pid'ов.
+        let finder = MutableStubFinder(["tier1.app": []])
+        let mlx = MLXSupervisor()
+        let ws = FakeWorkspaceEventSource()
+        let coord = VortexCoordinator(
+            mlx: mlx,
+            vortex: stub,
+            monitor: monitor,
+            tier1BundleIds: ["tier1.app"],
+            tier2BundleIds: ["tier2.app"],
+            finder: finder,
+            workspaceSource: ws,
+            gradualThawDelaySeconds: 0.1
+        )
+        await coord.startMonitoring()
+        try await Task.sleep(for: .milliseconds(50))
+
+        // Прогон: pressure→critical при пустом tier-1 → freezeTier
+        // вызывается, но finder возвращает empty → freezeProcess не
+        // вызывается. Всё correctно по pre-fix поведению.
+        pressureSrc.emit(.critical)
+        try await Task.sleep(for: .milliseconds(200))
+        let frozenAfterCritical = await stub.currentlyFrozen()
+        XCTAssertTrue(frozenAfterCritical.isEmpty,
+                      "при пустом finder freeze не fires (sanity)")
+
+        // Новый tier-1 app запущен под sustained .critical. Pre-fix:
+        // .appActivated falls в default → freeze не triggers. Post-fix:
+        // case .appActivated re-evaluates freezeTier → новый pid frozen.
+        await finder.add(bundleId: "tier1.app", pid: 5001)
+        ws.emit(.appActivated(pid: 5001, bundleId: "tier1.app"))
+        try await Task.sleep(for: .milliseconds(200))
+
+        let frozenAfterActivate = await stub.currentlyFrozen()
+        XCTAssertEqual(frozenAfterActivate, [5001],
+                       "Bug-3: новый tier-1 pid должен быть frozen на .appActivated при sustained .critical")
+
+        await coord.stopMonitoring()
+    }
+
+    /// `.appActivated` под `.normal` НЕ морозит — re-evaluation срабатывает
+    /// только когда давление выше `.normal`.
+    func testAppActivatedUnderNormalDoesNotFreeze() async throws {
+        let pressureSrc = FakeMemoryPressureSource()
+        let monitor = MemoryPressureMonitor(source: pressureSrc, cooldownSeconds: 0.5)
+        let stub = StubVortex()
+        let finder = MutableStubFinder(["tier1.app": []])
+        let mlx = MLXSupervisor()
+        let ws = FakeWorkspaceEventSource()
+        let coord = VortexCoordinator(
+            mlx: mlx,
+            vortex: stub,
+            monitor: monitor,
+            tier1BundleIds: ["tier1.app"],
+            tier2BundleIds: ["tier2.app"],
+            finder: finder,
+            workspaceSource: ws
+        )
+        await coord.startMonitoring()
+        try await Task.sleep(for: .milliseconds(50))
+
+        await finder.add(bundleId: "tier1.app", pid: 5002)
+        ws.emit(.appActivated(pid: 5002, bundleId: "tier1.app"))
+        try await Task.sleep(for: .milliseconds(150))
+
+        let frozen = await stub.currentlyFrozen()
+        XCTAssertTrue(frozen.isEmpty,
+                      "под .normal новый tier-1 app не должен морозиться")
+        await coord.stopMonitoring()
+    }
+
+    /// `.appActivated` для tier-2 bundle под `.warning` НЕ морозит
+    /// (tier-2 требует `.critical`). Под `.critical` — морозит.
+    func testAppActivatedTier2RespectsCriticalThreshold() async throws {
+        let pressureSrc = FakeMemoryPressureSource()
+        let monitor = MemoryPressureMonitor(source: pressureSrc, cooldownSeconds: 0.5)
+        let stub = StubVortex()
+        let finder = MutableStubFinder([:])
+        let mlx = MLXSupervisor()
+        let ws = FakeWorkspaceEventSource()
+        let coord = VortexCoordinator(
+            mlx: mlx,
+            vortex: stub,
+            monitor: monitor,
+            tier1BundleIds: ["tier1.app"],
+            tier2BundleIds: ["tier2.app"],
+            finder: finder,
+            workspaceSource: ws,
+            gradualThawDelaySeconds: 0.1
+        )
+        await coord.startMonitoring()
+        try await Task.sleep(for: .milliseconds(50))
+
+        // Pressure .warning. Tier-2 app запускается — НЕ должен морозиться
+        // (tier-2 требует .critical).
+        pressureSrc.emit(.warning)
+        try await Task.sleep(for: .milliseconds(150))
+
+        await finder.add(bundleId: "tier2.app", pid: 6001)
+        ws.emit(.appActivated(pid: 6001, bundleId: "tier2.app"))
+        try await Task.sleep(for: .milliseconds(150))
+
+        let frozenAtWarning = await stub.currentlyFrozen()
+        XCTAssertTrue(frozenAtWarning.isEmpty,
+                      "tier-2 не должен морозиться под .warning")
+
+        // Pressure эскалирует до .critical. Тот же tier-2 app — должен
+        // быть заморожен через `applyPolicy(.critical)` path (level
+        // change triggers freezeTier).
+        pressureSrc.emit(.critical)
+        try await Task.sleep(for: .milliseconds(200))
+
+        let frozenAtCritical = await stub.currentlyFrozen()
+        XCTAssertEqual(frozenAtCritical, [6001],
+                       "tier-2 морозится на .critical")
         await coord.stopMonitoring()
     }
 }
