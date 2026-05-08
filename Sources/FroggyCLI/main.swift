@@ -91,7 +91,14 @@ struct FroggyCLI {
         let stream = client.generateStream(prompt: p, maxTokens: maxTokens, useContext: useContext)
         for try await chunk in stream {
             print(chunk, terminator: "")
-            FileHandle.standardOutput.synchronizeFile()
+            // `fflush(stdout)` для немедленной выдачи токенов в streaming
+            // режиме. Раньше тут был `FileHandle.standardOutput.synchronizeFile()`
+            // (= fsync), который **не определён** для non-tty FileHandle'ов
+            // (pipe, redirect, /dev/null) — кидал `NSFileHandleOperationException`
+            // и крашил CLI при любом запуске не из interactive shell'а
+            // (`echo x | froggy gen "..."`, CI скрипты, через harness'ы).
+            // `fflush` работает на любом FILE*, в т.ч. pipe. Bug-1.
+            fflush(stdout)
         }
         print() // trailing newline
     }
