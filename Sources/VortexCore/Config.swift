@@ -64,7 +64,7 @@ public struct FroggyConfig: Codable, Sendable, Equatable {
         pageoutStrategy: PageoutStrategy = .jetsam,
         pageoutScratchMB: Int = 256,
         mlxWorkerPath: String? = nil,
-        freezeRankingEnabled: Bool = false,
+        freezeRankingEnabled: Bool = true,
         kvCacheBits: Int = 8,
         ipcSocketPath: String = FroggyConfig.defaultSocketPath,
         frameSimilarityThreshold: Double = 0.98,

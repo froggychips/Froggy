@@ -225,8 +225,24 @@ public actor VortexCoordinator: WorkspaceTerminationWatcher.Sink {
                     tier2Frozen.remove(pid)
                 }
             }
+        case let .appActivated(_, bundleId):
+            // Re-evaluate freeze под sustained pressure'ом, когда
+            // tier-1/tier-2 app запускается ИЛИ активируется. `applyPolicy`
+            // event-driven на pressure level changes — без этого pathа,
+            // когда давление держится на `.warning`/`.critical` и
+            // пользователь открывает новый tier-1 app (Telegram под
+            // Discord-frontmost'ом, например), он бы никогда не попал
+            // под freeze. `freezeTier` идемпотентен (skip already-frozen
+            // + frontmost-veto), безопасно вызывать повторно.
+            guard !sleeping, let bundleId else { break }
+            let level = await monitor.currentLevel()
+            if tier1BundleIds.contains(bundleId), level >= .warning {
+                await freezeTier(.tier1)
+            } else if tier2BundleIds.contains(bundleId), level >= .critical {
+                await freezeTier(.tier2)
+            }
         default:
-            // Activate/deactivate/terminate/screen-events — не наша забота
+            // Deactivate/terminate/screen-events — не наша забота
             // на этом слое (terminate ловит WorkspaceTerminationWatcher,
             // screen-события — VisionActor).
             break
