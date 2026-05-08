@@ -219,6 +219,14 @@ struct FroggyDaemon {
             src.setEventHandler {
                 log.notice("signal \(sig) received — shutting down")
                 Task {
+                    // Bug-6: до exit'а **обязательно** kill'нуть MLX worker.
+                    // Без этого worker остаётся orphan'ом (PPID=1, ~935 MB
+                    // RAM висит до manual cleanup / reboot'а). MLXSupervisor
+                    // владеет lifecycle'ом worker'а — `unloadModel` шлёт
+                    // SIGTERM → SIGKILL fallback. Делается **до** thaw'а,
+                    // чтобы worker не получил pressure-induced SIGSTOP в
+                    // последний момент (race с unloadModel'ом).
+                    await coordinator.unloadModel()
                     await coordinator.emergencyThaw()
                     exit(0)
                 }
