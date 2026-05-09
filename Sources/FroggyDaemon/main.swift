@@ -100,7 +100,9 @@ struct FroggyDaemon {
             callModelPath: config.callModelPath,
             mainModelPath: config.modelPath,
             audioLocale: config.audioLocale,
-            audioOnDeviceRecognition: config.audioOnDeviceRecognition
+            audioOnDeviceRecognition: config.audioOnDeviceRecognition,
+            echoSuppressionEnabled: config.echoSuppressionEnabled,
+            echoSuppressionTailMs: config.echoSuppressionTailMs
         )
         await coordinator.startMonitoring()
         // Termination-watcher: чистит FrozenPidsStore при внешнем kill'е.
@@ -403,7 +405,9 @@ struct DaemonIPCHandler: IPCRequestHandler, Sendable {
                 try await audioSupervisor.startCapture(
                     discordPid: request.discordPid,
                     locale: coordinator.audioLocale,
-                    onDeviceRecognition: coordinator.audioOnDeviceRecognition
+                    onDeviceRecognition: coordinator.audioOnDeviceRecognition,
+                    echoSuppression: coordinator.echoSuppressionEnabled,
+                    echoSuppressionTailMs: coordinator.echoSuppressionTailMs
                 )
                 var r = IPCResponse()
                 r.ok = true

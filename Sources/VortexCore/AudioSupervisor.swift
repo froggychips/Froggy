@@ -74,7 +74,9 @@ public actor AudioSupervisor {
     public func startCapture(
         discordPid: Int32?,
         locale: String = "ru-RU",
-        onDeviceRecognition: Bool = true
+        onDeviceRecognition: Bool = true,
+        echoSuppression: Bool = true,
+        echoSuppressionTailMs: Int = 400
     ) async throws {
         try ensureWorkerSpawned()
 
@@ -87,7 +89,9 @@ public actor AudioSupervisor {
                     discordPid: discordPid,
                     requestId: id,
                     locale: locale,
-                    onDeviceRecognition: onDeviceRecognition
+                    onDeviceRecognition: onDeviceRecognition,
+                    echoSuppression: echoSuppression,
+                    echoSuppressionTailMs: echoSuppressionTailMs
                 ))
             } catch {
                 self.pendingRequests.removeValue(forKey: id)
@@ -95,7 +99,7 @@ public actor AudioSupervisor {
             }
         }
         capturing = true
-        Self.log.notice("audio capture started discord_pid=\(discordPid.map(String.init) ?? "none") locale=\(locale) onDevice=\(onDeviceRecognition)")
+        Self.log.notice("audio capture started discord_pid=\(discordPid.map(String.init) ?? "none") locale=\(locale) onDevice=\(onDeviceRecognition) echo=\(echoSuppression)")
     }
 
     /// Останавливает запись. Worker остаётся жить (готов к следующей сессии).

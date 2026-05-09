@@ -32,6 +32,10 @@ public actor VortexCoordinator: WorkspaceTerminationWatcher.Sink {
     public nonisolated let audioLocale: String
     /// Только on-device SR (не отправлять аудио в Apple cloud).
     public nonisolated let audioOnDeviceRecognition: Bool
+    /// Echo suppression: гейтим mic пока Discord-тап активен.
+    public nonisolated let echoSuppressionEnabled: Bool
+    /// Хвост mic-gate после последнего Discord-аудио (мс).
+    public nonisolated let echoSuppressionTailMs: Int
 
     private let finder: any ProcessFinder
     private let workspaceSource: (any WorkspaceEventSource)?
@@ -73,7 +77,9 @@ public actor VortexCoordinator: WorkspaceTerminationWatcher.Sink {
         callModelPath: String? = nil,
         mainModelPath: String? = nil,
         audioLocale: String = "ru-RU",
-        audioOnDeviceRecognition: Bool = true
+        audioOnDeviceRecognition: Bool = true,
+        echoSuppressionEnabled: Bool = true,
+        echoSuppressionTailMs: Int = 400
     ) {
         self.mlx = mlx
         self.vortex = vortex
@@ -87,6 +93,8 @@ public actor VortexCoordinator: WorkspaceTerminationWatcher.Sink {
         self.mainModelPath = mainModelPath
         self.audioLocale = audioLocale
         self.audioOnDeviceRecognition = audioOnDeviceRecognition
+        self.echoSuppressionEnabled = echoSuppressionEnabled
+        self.echoSuppressionTailMs = echoSuppressionTailMs
     }
 
     // MARK: - Lifecycle

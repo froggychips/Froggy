@@ -10,19 +10,27 @@ public struct AudioWorkerCommand: Codable, Sendable {
     public var locale: String?
     /// Если true — только on-device распознавание (приватность, без Apple cloud).
     public var onDeviceRecognition: Bool?
+    /// Подавлять микрофон пока Discord-тап активен (echo suppression).
+    public var echoSuppression: Bool?
+    /// Сколько мс держать mic-gate после последнего Discord-аудио.
+    public var echoSuppressionTailMs: Int?
 
     public init(
         cmd: String,
         discordPid: Int32? = nil,
         requestId: String? = nil,
         locale: String? = nil,
-        onDeviceRecognition: Bool? = nil
+        onDeviceRecognition: Bool? = nil,
+        echoSuppression: Bool? = nil,
+        echoSuppressionTailMs: Int? = nil
     ) {
         self.cmd = cmd
         self.discordPid = discordPid
         self.requestId = requestId
         self.locale = locale
         self.onDeviceRecognition = onDeviceRecognition
+        self.echoSuppression = echoSuppression
+        self.echoSuppressionTailMs = echoSuppressionTailMs
     }
 
     public static let startCapture = "startCapture"
