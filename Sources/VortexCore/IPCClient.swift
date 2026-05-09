@@ -165,8 +165,14 @@ public actor IPCClient {
         try await send(IPCRequest(cmd: "thawAll"))
     }
 
-    public func listen(discordPid: Int32? = nil) async throws -> IPCResponse {
-        try await send(IPCRequest(cmd: "listen", discordPid: discordPid))
+    public func listen(discordPid: Int32? = nil, injectFile: String? = nil) async throws -> IPCResponse {
+        try await send(IPCRequest(cmd: "listen", path: injectFile, discordPid: discordPid))
+    }
+
+    /// Инжектирует произвольный текст в markdown-файл текущей сессии.
+    /// Ошибка если сессия не активна.
+    public func injectContext(_ text: String, title: String? = nil) async throws -> IPCResponse {
+        try await send(IPCRequest(cmd: "injectContext", prompt: text, accessor: title))
     }
 
     public func listenStop() async throws -> IPCResponse {

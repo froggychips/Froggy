@@ -189,6 +189,7 @@ struct FroggyCLI {
 
     private static func runListen(_ client: IPCClient, _ args: [String]) async throws {
         var discordPid: Int32?
+        var injectFile: String?
         var i = 0
         while i < args.count {
             if (args[i] == "--discord-pid" || args[i] == "-d"), i + 1 < args.count {
@@ -196,11 +197,13 @@ struct FroggyCLI {
                     stderr("--discord-pid needs an integer"); exit(2)
                 }
                 discordPid = v; i += 2
+            } else if args[i] == "--inject", i + 1 < args.count {
+                injectFile = args[i + 1]; i += 2
             } else {
-                stderr("usage: froggy listen [--discord-pid PID]"); exit(2)
+                stderr("usage: froggy listen [--discord-pid PID] [--inject FILE]"); exit(2)
             }
         }
-        let r = try await client.listen(discordPid: discordPid)
+        let r = try await client.listen(discordPid: discordPid, injectFile: injectFile)
         if r.ok == true {
             print("listening: \(r.listening == true ? "yes" : "no")")
         } else {
@@ -286,7 +289,7 @@ struct FroggyCLI {
       accessors [--experimental|--core]   list registered LushaAccessors
       snap <accessor-id>                  run one accessor and print its lines
       thaw                                SIGCONT all frozen processes
-      listen [--discord-pid PID]          start meeting transcription (swap to call model)
+      listen [--discord-pid PID] [--inject FILE]  start meeting transcription; optionally inject pre-call context from FILE
       listen-stop                         stop transcription (swap back to main model)
       listen-status                       show whether transcription is active
       listen-stream                       stream transcript chunks to stdout (blocking)

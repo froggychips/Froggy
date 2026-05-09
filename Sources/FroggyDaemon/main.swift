@@ -411,6 +411,13 @@ struct DaemonIPCHandler: IPCRequestHandler, Sendable {
                     vadEnabled: coordinator.vadEnabled,
                     vadRmsThreshold: coordinator.vadRmsThreshold
                 )
+                // Инжект произвольного контекста перед созвоном
+                if let injectPath = request.path,
+                   let text = try? String(contentsOfFile: injectPath, encoding: .utf8),
+                   !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    await audioSupervisor.appendContext(text, title: "Pre-call Context")
+                    log.notice("injected context from \(injectPath, privacy: .public)")
+                }
                 var r = IPCResponse()
                 r.ok = true
                 r.listening = true
@@ -422,6 +429,17 @@ struct DaemonIPCHandler: IPCRequestHandler, Sendable {
             } catch {
                 return .failure("listen failed: \(error)")
             }
+
+        case "injectContext":
+            guard await audioSupervisor.isCapturing() else {
+                return .failure("no active listen session — start with `froggy listen` first")
+            }
+            guard let text = request.prompt, !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                return .failure("missing text — set prompt field")
+            }
+            let title = request.accessor ?? "Injected Context"
+            await audioSupervisor.appendContext(text, title: title)
+            return .success()
 
         case "listenStop":
             let sessionPath = await audioSupervisor.sessionURL()?.path
