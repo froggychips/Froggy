@@ -407,13 +407,16 @@ struct DaemonIPCHandler: IPCRequestHandler, Sendable {
                     locale: coordinator.audioLocale,
                     onDeviceRecognition: coordinator.audioOnDeviceRecognition,
                     echoSuppression: coordinator.echoSuppressionEnabled,
-                    echoSuppressionTailMs: coordinator.echoSuppressionTailMs
+                    echoSuppressionTailMs: coordinator.echoSuppressionTailMs,
+                    vadEnabled: coordinator.vadEnabled,
+                    vadRmsThreshold: coordinator.vadRmsThreshold
                 )
                 var r = IPCResponse()
                 r.ok = true
                 r.listening = true
                 r.audioOutputDevice = AudioSupervisor.currentOutputDeviceName()
                 r.audioInputDevice = AudioSupervisor.currentInputDeviceName()
+                r.sessionURL = await audioSupervisor.sessionURL()?.path
                 r.final = true
                 return r
             } catch {
@@ -421,6 +424,7 @@ struct DaemonIPCHandler: IPCRequestHandler, Sendable {
             }
 
         case "listenStop":
+            let sessionPath = await audioSupervisor.sessionURL()?.path
             await audioSupervisor.stopCapture()
             // Swap обратно на основную модель если callModelPath был другой
             let mainPath = coordinator.mainModelPath
@@ -431,9 +435,19 @@ struct DaemonIPCHandler: IPCRequestHandler, Sendable {
                     // не fatal — summary всё равно попробуем
                 }
             }
+            // LLM summary: читаем markdown сессии → генерируем → appendSection
+            if let sessionPath {
+                Task {
+                    await generateSessionSummary(
+                        sessionPath: sessionPath,
+                        coordinator: coordinator
+                    )
+                }
+            }
             var r = IPCResponse()
             r.ok = true
             r.listening = false
+            r.sessionURL = sessionPath
             r.final = true
             return r
 
@@ -443,6 +457,7 @@ struct DaemonIPCHandler: IPCRequestHandler, Sendable {
             r.listening = await audioSupervisor.isCapturing()
             r.audioOutputDevice = AudioSupervisor.currentOutputDeviceName()
             r.audioInputDevice = AudioSupervisor.currentInputDeviceName()
+            r.sessionURL = await audioSupervisor.sessionURL()?.path
             r.final = true
             return r
 
@@ -544,6 +559,45 @@ struct DaemonIPCHandler: IPCRequestHandler, Sendable {
         default:
             return nil
         }
+    }
+}
+
+// MARK: - LLM session summary
+
+private func generateSessionSummary(sessionPath: String, coordinator: VortexCoordinator) async {
+    let log = Logger(subsystem: "com.froggychips.froggy", category: "daemon")
+    guard await coordinator.mlx.isLoaded() else {
+        log.notice("session summary skipped — model not loaded")
+        return
+    }
+    guard let transcript = try? String(contentsOfFile: sessionPath, encoding: .utf8),
+          !transcript.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+        log.warning("session summary skipped — transcript empty or unreadable")
+        return
+    }
+    let prompt = """
+    Ниже транскрипт встречи. Напиши краткое резюме на русском языке:
+    1. Что обсуждалось (3–5 пунктов).
+    2. Принятые решения.
+    3. Action items с владельцами (если упомянуты).
+    Пиши лаконично, без вводных фраз.
+
+    ---
+    \(transcript.prefix(12000))
+    """
+    do {
+        let summary = try await coordinator.generate(prompt: prompt, maxTokens: 600)
+        let section = "\n## Summary\n\n\(summary)\n"
+        guard let fh = FileHandle(forUpdatingAtPath: sessionPath) else {
+            log.warning("session summary: cannot open file for update")
+            return
+        }
+        fh.seekToEndOfFile()
+        fh.write(Data(section.utf8))
+        try? fh.close()
+        log.notice("session summary written to \(sessionPath, privacy: .public)")
+    } catch {
+        log.error("session summary failed: \(error.localizedDescription, privacy: .public)")
     }
 }
 

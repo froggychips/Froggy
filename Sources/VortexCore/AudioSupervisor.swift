@@ -39,6 +39,8 @@ public actor AudioSupervisor {
     private var pendingRequests: [String: CheckedContinuation<Void, any Error>] = [:]
     private var subscribers: [UUID: AsyncStream<TranscriptEvent>.Continuation] = [:]
     private var capturing = false
+    private var sessionStore: SessionStore?
+    private var lastSessionURL: URL?
 
     public init(workerExecutableURL: URL? = nil) {
         self.workerURL = workerExecutableURL ?? Self.defaultWorkerURL()
@@ -53,6 +55,9 @@ public actor AudioSupervisor {
     // MARK: - Public API
 
     public func isCapturing() -> Bool { capturing }
+
+    /// URL markdown-файла последней/текущей сессии. nil если сессий не было.
+    public func sessionURL() -> URL? { lastSessionURL ?? sessionStore?.url }
 
     /// Подписывается на поток транскрипта. Возвращает AsyncStream и ID подписки.
     /// Вызови `unsubscribe(id:)` когда клиент отключился, иначе continuation утечёт.
@@ -76,7 +81,9 @@ public actor AudioSupervisor {
         locale: String = "ru-RU",
         onDeviceRecognition: Bool = true,
         echoSuppression: Bool = true,
-        echoSuppressionTailMs: Int = 400
+        echoSuppressionTailMs: Int = 400,
+        vadEnabled: Bool = true,
+        vadRmsThreshold: Double = 0.008
     ) async throws {
         try ensureWorkerSpawned()
 
@@ -91,7 +98,9 @@ public actor AudioSupervisor {
                     locale: locale,
                     onDeviceRecognition: onDeviceRecognition,
                     echoSuppression: echoSuppression,
-                    echoSuppressionTailMs: echoSuppressionTailMs
+                    echoSuppressionTailMs: echoSuppressionTailMs,
+                    vadEnabled: vadEnabled,
+                    vadRmsThreshold: vadRmsThreshold
                 ))
             } catch {
                 self.pendingRequests.removeValue(forKey: id)
@@ -99,6 +108,13 @@ public actor AudioSupervisor {
             }
         }
         capturing = true
+        let sessionURL = SessionStore.makeURL()
+        if let store = try? SessionStore(at: sessionURL) {
+            sessionStore = store
+            lastSessionURL = sessionURL
+        } else {
+            Self.log.error("session store creation failed: \(sessionURL.path, privacy: .public)")
+        }
         Self.log.notice("audio capture started discord_pid=\(discordPid.map(String.init) ?? "none") locale=\(locale) onDevice=\(onDeviceRecognition) echo=\(echoSuppression)")
     }
 
@@ -189,12 +205,15 @@ public actor AudioSupervisor {
             }
 
         case AudioWorkerEvent.transcript:
-            let event = TranscriptEvent(
+            let te = TranscriptEvent(
                 text: event.text ?? "",
                 isFinal: event.isFinal ?? false,
                 speaker: event.speaker ?? "unknown"
             )
-            for cont in subscribers.values { cont.yield(event) }
+            if te.isFinal, let store = sessionStore {
+                Task { await store.append(speaker: te.speaker, text: te.text) }
+            }
+            for cont in subscribers.values { cont.yield(te) }
 
         case AudioWorkerEvent.error:
             if let id = event.requestId, let cont = pendingRequests.removeValue(forKey: id) {
@@ -233,6 +252,10 @@ public actor AudioSupervisor {
         stdinHandle = nil
         process = nil
         capturing = false
+        if let store = sessionStore {
+            Task { await store.close() }
+            sessionStore = nil
+        }
     }
 
     // MARK: - Utilities

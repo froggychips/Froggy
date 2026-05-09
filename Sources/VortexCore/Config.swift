@@ -55,6 +55,11 @@ public struct FroggyConfig: Codable, Sendable, Equatable {
     /// 400ms покрывает комнатный реверб + задержку микрофона.
     public var echoSuppressionTailMs: Int
 
+    /// Voice Activity Detection: пропускать mic-буферы тише этого RMS.
+    /// ~0.008 (-42 dBFS) — отсекает фоновый шум без потери тихой речи.
+    public var vadEnabled: Bool
+    public var vadRmsThreshold: Double
+
     /// Mem-5 этап 1: собирать ли телеметрию freeze/thaw в SQLite.
     /// На этапе 1 мы только пишем; ranking-overlay пойдёт отдельным PR'ом.
     /// См. ADR 0010.
@@ -93,6 +98,8 @@ public struct FroggyConfig: Codable, Sendable, Equatable {
         audioOnDeviceRecognition: Bool = true,
         echoSuppressionEnabled: Bool = true,
         echoSuppressionTailMs: Int = 400,
+        vadEnabled: Bool = true,
+        vadRmsThreshold: Double = 0.008,
         freezeRankingEnabled: Bool = true,
         kvCacheBits: Int = 8,
         ipcSocketPath: String = FroggyConfig.defaultSocketPath,
@@ -118,6 +125,8 @@ public struct FroggyConfig: Codable, Sendable, Equatable {
         self.audioOnDeviceRecognition = audioOnDeviceRecognition
         self.echoSuppressionEnabled = echoSuppressionEnabled
         self.echoSuppressionTailMs = echoSuppressionTailMs
+        self.vadEnabled = vadEnabled
+        self.vadRmsThreshold = vadRmsThreshold
         self.freezeRankingEnabled = freezeRankingEnabled
         self.kvCacheBits = kvCacheBits
         self.ipcSocketPath = ipcSocketPath
@@ -185,6 +194,8 @@ public struct FroggyConfig: Codable, Sendable, Equatable {
         self.audioOnDeviceRecognition = try c.decodeIfPresent(Bool.self, forKey: .audioOnDeviceRecognition) ?? d.audioOnDeviceRecognition
         self.echoSuppressionEnabled = try c.decodeIfPresent(Bool.self, forKey: .echoSuppressionEnabled) ?? d.echoSuppressionEnabled
         self.echoSuppressionTailMs = try c.decodeIfPresent(Int.self, forKey: .echoSuppressionTailMs) ?? d.echoSuppressionTailMs
+        self.vadEnabled = try c.decodeIfPresent(Bool.self, forKey: .vadEnabled) ?? d.vadEnabled
+        self.vadRmsThreshold = try c.decodeIfPresent(Double.self, forKey: .vadRmsThreshold) ?? d.vadRmsThreshold
         self.kvCacheBits = try c.decodeIfPresent(Int.self, forKey: .kvCacheBits) ?? d.kvCacheBits
 
         self.ipcSocketPath = try c.decodeIfPresent(String.self, forKey: .ipcSocketPath) ?? d.ipcSocketPath
