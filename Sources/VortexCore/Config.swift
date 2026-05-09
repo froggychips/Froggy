@@ -77,6 +77,10 @@ public struct FroggyConfig: Codable, Sendable, Equatable {
     public var contextDedupEnabled: Bool
     public var contextDedupThreshold: Double
 
+    /// Discord Incoming Webhook URL для уведомлений о начале/конце записи созвона.
+    /// nil — уведомления отключены. Env: DISCORD_NOTIFY_WEBHOOK.
+    public var discordNotifyWebhookURL: String?
+
     /// **DEPRECATED.** Алиас на `freezeTier1BundleIds` для обратной совместимости
     /// со старыми `config.json`. Если в файле указано и старое, и новое поле —
     /// побеждает новое. Удалить в одной из следующих фаз.
@@ -108,6 +112,7 @@ public struct FroggyConfig: Codable, Sendable, Equatable {
         contextMaxChars: Int = 4096,
         contextDedupEnabled: Bool = true,
         contextDedupThreshold: Double = 0.85,
+        discordNotifyWebhookURL: String? = nil,
         freezeBundleIds: [String]? = nil
     ) {
         self.modelPath = modelPath
@@ -135,6 +140,7 @@ public struct FroggyConfig: Codable, Sendable, Equatable {
         self.contextMaxChars = contextMaxChars
         self.contextDedupEnabled = contextDedupEnabled
         self.contextDedupThreshold = contextDedupThreshold
+        self.discordNotifyWebhookURL = discordNotifyWebhookURL
         self.freezeBundleIds = freezeBundleIds
     }
 
@@ -204,6 +210,8 @@ public struct FroggyConfig: Codable, Sendable, Equatable {
         self.contextMaxChars = try c.decodeIfPresent(Int.self, forKey: .contextMaxChars) ?? d.contextMaxChars
         self.contextDedupEnabled = try c.decodeIfPresent(Bool.self, forKey: .contextDedupEnabled) ?? d.contextDedupEnabled
         self.contextDedupThreshold = try c.decodeIfPresent(Double.self, forKey: .contextDedupThreshold) ?? d.contextDedupThreshold
+        let webhookFromConfig = try c.decodeIfPresent(String.self, forKey: .discordNotifyWebhookURL)
+        self.discordNotifyWebhookURL = ProcessInfo.processInfo.environment["DISCORD_NOTIFY_WEBHOOK"] ?? webhookFromConfig
     }
 
     /// Loads config from `url`, returning defaults if the file is missing.

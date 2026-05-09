@@ -162,7 +162,8 @@ struct FroggyDaemon {
             augmenter: PromptAugmenter(maxContextChars: config.contextMaxChars),
             freezeStats: freezeStats,
             defaultContextChars: config.contextMaxChars,
-            audioSupervisor: audioSupervisor
+            audioSupervisor: audioSupervisor,
+            discordNotifyWebhookURL: config.discordNotifyWebhookURL
         )
         let ipc = IPCServer(socketPath: config.ipcSocketPath, handler: handler)
         do {
@@ -273,6 +274,20 @@ struct DaemonIPCHandler: IPCRequestHandler, Sendable {
     let freezeStats: FreezeStatsStore?
     let defaultContextChars: Int
     let audioSupervisor: AudioSupervisor
+    let discordNotifyWebhookURL: String?
+
+    /// Fire-and-forget уведомление в Discord webhook. Не блокирует IPC.
+    private func notifyDiscord(_ message: String) {
+        guard let urlString = discordNotifyWebhookURL,
+              let url = URL(string: urlString) else { return }
+        Task {
+            var req = URLRequest(url: url)
+            req.httpMethod = "POST"
+            req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+            req.httpBody = try? JSONSerialization.data(withJSONObject: ["content": message])
+            _ = try? await URLSession.shared.data(for: req)
+        }
+    }
 
     /// Если useContext == true, оборачиваем prompt в шаблон с свежим контекстом.
     private func augmentedPrompt(_ prompt: String, useContext: Bool?) async -> String {
@@ -379,9 +394,20 @@ struct DaemonIPCHandler: IPCRequestHandler, Sendable {
             return r
 
         case "freeze":
-            guard let pid = request.pid else { return .failure("missing 'pid'") }
+            let targetPid: Int32
+            if let pid = request.pid {
+                targetPid = pid
+            } else if let bundleId = request.path {
+                let pids = await NSWorkspaceProcessFinder().pids(forBundleIds: [bundleId])
+                guard let found = pids.first else {
+                    return .failure("app not running: \(bundleId)")
+                }
+                targetPid = found
+            } else {
+                return .failure("missing 'pid' or bundle_id (path)")
+            }
             do {
-                try await vortex.freezeProcess(pid: pid)
+                try await vortex.freezeProcess(pid: targetPid)
                 return .success()
             } catch {
                 return .failure(String(describing: error))
@@ -425,6 +451,7 @@ struct DaemonIPCHandler: IPCRequestHandler, Sendable {
                 r.audioInputDevice = AudioSupervisor.currentInputDeviceName()
                 r.sessionURL = await audioSupervisor.sessionURL()?.path
                 r.final = true
+                notifyDiscord("🔴 Meeting recording started")
                 return r
             } catch {
                 return .failure("listen failed: \(error)")
@@ -464,6 +491,8 @@ struct DaemonIPCHandler: IPCRequestHandler, Sendable {
             r.listening = false
             r.sessionURL = sessionPath
             r.final = true
+            let stopMsg = sessionPath != nil ? "🟢 Meeting recording stopped — transcript saved" : "🟢 Meeting recording stopped"
+            notifyDiscord(stopMsg)
             return r
 
         case "listenStatus":
