@@ -13,11 +13,13 @@ let package = Package(
         .executable(name: "FroggyDaemon", targets: ["FroggyDaemon"]),
         .executable(name: "FroggyMenuBar", targets: ["FroggyMenuBar"]),
         .executable(name: "FroggyMLXWorker", targets: ["FroggyMLXWorker"]),
+        .executable(name: "FroggyAudioWorker", targets: ["FroggyAudioWorker"]),
         .executable(name: "froggy", targets: ["FroggyCLI"]),
         .library(name: "VortexCore", targets: ["VortexCore"]),
         .library(name: "LushaBridge", targets: ["LushaBridge"]),
         .library(name: "LushaExperimental", targets: ["LushaExperimental"]),
         .library(name: "MLXWorkerProtocol", targets: ["MLXWorkerProtocol"]),
+        .library(name: "AudioWorkerProtocol", targets: ["AudioWorkerProtocol"]),
     ],
     dependencies: [
         .package(url: "https://github.com/ml-explore/mlx-swift-lm", from: "3.0.0"),
@@ -73,9 +75,22 @@ let package = Package(
             dependencies: [],
             swiftSettings: strictConcurrency
         ),
+        // Аудио-worker: захват Discord через CATapDescription + mic через AVAudioEngine,
+        // транскрипция через SFSpeechRecognizer. Паттерн subprocess isolation — ADR 0008.
+        .executableTarget(
+            name: "FroggyAudioWorker",
+            dependencies: ["AudioWorkerProtocol"],
+            swiftSettings: strictConcurrency
+        ),
+        // Wire-протокол между демоном и FroggyAudioWorker — зеркало MLXWorkerProtocol.
+        .target(
+            name: "AudioWorkerProtocol",
+            dependencies: [],
+            swiftSettings: strictConcurrency
+        ),
         .target(
             name: "VortexCore",
-            dependencies: ["MLXWorkerProtocol"],
+            dependencies: ["MLXWorkerProtocol", "AudioWorkerProtocol"],
             swiftSettings: strictConcurrency,
             linkerSettings: [
                 // sqlite3 для FreezeStatsStore — Mem-5 telemetry. macOS его

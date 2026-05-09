@@ -165,6 +165,25 @@ public actor IPCClient {
         try await send(IPCRequest(cmd: "thawAll"))
     }
 
+    public func listen(discordPid: Int32? = nil) async throws -> IPCResponse {
+        try await send(IPCRequest(cmd: "listen", discordPid: discordPid))
+    }
+
+    public func listenStop() async throws -> IPCResponse {
+        try await send(IPCRequest(cmd: "listenStop"))
+    }
+
+    public func listenStatus() async throws -> IPCResponse {
+        try await send(IPCRequest(cmd: "listenStatus"))
+    }
+
+    /// Стриминговая подписка на транскрипт созвона.
+    /// Каждый IPCResponse несёт один chunk: text + speaker; final == isFinal из SR.
+    /// Поток завершается когда захват остановлен или worker упал.
+    public nonisolated func listenStream() -> AsyncThrowingStream<IPCResponse, any Error> {
+        sendStream(IPCRequest(cmd: "listenStream"), timeout: .seconds(3600))
+    }
+
     // MARK: - BSD socket plumbing
 
     /// Открывает соединение, отправляет один запрос, читает строку-за-строкой.

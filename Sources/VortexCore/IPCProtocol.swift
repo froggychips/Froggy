@@ -12,6 +12,8 @@ public struct IPCRequest: Codable, Sendable {
     /// Фильтр для cmd `accessors`: если nil — вернуть все; true/false —
     /// только experimental или только core. См. ADR 0011 § EXP-1.
     public var experimental: Bool?
+    /// Discord process PID для cmd `listen`.
+    public var discordPid: Int32?
 
     public init(
         cmd: String,
@@ -22,7 +24,8 @@ public struct IPCRequest: Codable, Sendable {
         path: String? = nil,
         accessor: String? = nil,
         useContext: Bool? = nil,
-        experimental: Bool? = nil
+        experimental: Bool? = nil,
+        discordPid: Int32? = nil
     ) {
         self.cmd = cmd
         self.prompt = prompt
@@ -33,6 +36,7 @@ public struct IPCRequest: Codable, Sendable {
         self.accessor = accessor
         self.useContext = useContext
         self.experimental = experimental
+        self.discordPid = discordPid
     }
 }
 
@@ -69,6 +73,10 @@ public struct IPCResponse: Codable, Sendable {
     /// Маркер «это последний chunk в стриме». Для one-shot ответов — true.
     /// Для streaming-промежуточных chunk'ов — false.
     public var final: Bool?
+    /// Для cmd `listen`: идёт ли захват аудио прямо сейчас.
+    public var listening: Bool?
+    /// Для streaming транскрипта: спикер ("mic" | "discord").
+    public var speaker: String?
 
     public init() {}
 

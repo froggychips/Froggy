@@ -25,6 +25,10 @@ struct FroggyCLI {
             case "accessors": try await Self.runAccessors(client, rest)
             case "snap", "snapshot": try await Self.runSnapshot(client, rest)
             case "thaw": try await Self.runThaw(client)
+            case "listen": try await Self.runListen(client, rest)
+            case "listen-stop": try await Self.runListenStop(client)
+            case "listen-status": try await Self.runListenStatus(client)
+            case "listen-stream": try await Self.runListenStream(client)
             case "-h", "--help", "help":
                 print(Self.usage)
                 exit(0)
@@ -179,6 +183,55 @@ struct FroggyCLI {
         else { stderr(r.error ?? "thaw failed"); exit(1) }
     }
 
+    private static func runListen(_ client: IPCClient, _ args: [String]) async throws {
+        var discordPid: Int32?
+        var i = 0
+        while i < args.count {
+            if (args[i] == "--discord-pid" || args[i] == "-d"), i + 1 < args.count {
+                guard let v = Int32(args[i + 1]) else {
+                    stderr("--discord-pid needs an integer"); exit(2)
+                }
+                discordPid = v; i += 2
+            } else {
+                stderr("usage: froggy listen [--discord-pid PID]"); exit(2)
+            }
+        }
+        let r = try await client.listen(discordPid: discordPid)
+        if r.ok == true {
+            print("listening: \(r.listening == true ? "yes" : "no")")
+        } else {
+            stderr(r.error ?? "listen failed"); exit(1)
+        }
+    }
+
+    private static func runListenStop(_ client: IPCClient) async throws {
+        let r = try await client.listenStop()
+        if r.ok == true { print("stopped") }
+        else { stderr(r.error ?? "listen-stop failed"); exit(1) }
+    }
+
+    private static func runListenStatus(_ client: IPCClient) async throws {
+        let r = try await client.listenStatus()
+        if r.ok == true {
+            print("listening: \(r.listening == true ? "yes" : "no")")
+        } else {
+            stderr(r.error ?? "listen-status failed"); exit(1)
+        }
+    }
+
+    private static func runListenStream(_ client: IPCClient) async throws {
+        let stream = client.listenStream()
+        for try await chunk in stream {
+            guard chunk.ok == true else {
+                stderr(chunk.error ?? "stream error"); exit(1)
+            }
+            let speaker = chunk.speaker ?? "?"
+            let marker = chunk.final == true ? "" : "…"
+            print("[\(speaker)]\(marker) \(chunk.text ?? "")")
+            fflush(stdout)
+        }
+    }
+
     // MARK: - Helpers
 
     private static func fmt(_ v: Bool?) -> String {
@@ -205,6 +258,10 @@ struct FroggyCLI {
       accessors [--experimental|--core]   list registered LushaAccessors
       snap <accessor-id>                  run one accessor and print its lines
       thaw                                SIGCONT all frozen processes
+      listen [--discord-pid PID]          start meeting transcription (swap to call model)
+      listen-stop                         stop transcription (swap back to main model)
+      listen-status                       show whether transcription is active
+      listen-stream                       stream transcript chunks to stdout (blocking)
       help                                this message
 
     Environment:
