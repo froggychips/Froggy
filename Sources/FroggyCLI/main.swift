@@ -29,6 +29,7 @@ struct FroggyCLI {
             case "listen-stop": try await Self.runListenStop(client)
             case "listen-status": try await Self.runListenStatus(client)
             case "listen-stream": try await Self.runListenStream(client)
+            case "recap": try await Self.runRecap(client, rest)
             case "-h", "--help", "help":
                 print(Self.usage)
                 exit(0)
@@ -211,7 +212,10 @@ struct FroggyCLI {
         let r = try await client.listenStop()
         if r.ok == true {
             print("stopped")
-            if let path = r.sessionURL { print("session:  \(path)") }
+            if let path = r.sessionURL {
+                print("session:  \(path)")
+                print("hint:     froggy recap  (or  froggy recap --path <file>)")
+            }
         } else { stderr(r.error ?? "listen-stop failed"); exit(1) }
     }
 
@@ -238,6 +242,22 @@ struct FroggyCLI {
             print("[\(speaker)]\(marker) \(chunk.text ?? "")")
             fflush(stdout)
         }
+    }
+
+    private static func runRecap(_ client: IPCClient, _ args: [String]) async throws {
+        var path: String? = nil
+        var i = 0
+        while i < args.count {
+            if args[i] == "--path", i + 1 < args.count {
+                path = args[i + 1]; i += 2
+            } else { i += 1 }
+        }
+        let stream = client.recapStream(path: path)
+        for try await chunk in stream {
+            print(chunk, terminator: "")
+            fflush(stdout)
+        }
+        print() // финальный перевод строки
     }
 
     // MARK: - Helpers
@@ -270,6 +290,7 @@ struct FroggyCLI {
       listen-stop                         stop transcription (swap back to main model)
       listen-status                       show whether transcription is active
       listen-stream                       stream transcript chunks to stdout (blocking)
+      recap [--path <file>]               generate LLM summary of last session (streams tokens)
       help                                this message
 
     Environment:
