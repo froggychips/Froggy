@@ -121,6 +121,12 @@ actor WorkerRuntime {
         if !memoryLimitApplied {
             let physical = Int(ProcessInfo.processInfo.physicalMemory)
             MLX.Memory.memoryLimit = max(2 << 30, physical * 6 / 10)
+            // Cache limit: how aggressively MLX returns freed buffers to the system.
+            // 75% of Metal recommended working set prevents the cache from crowding
+            // out Vortex pressure management. signerlabs/Klee LLMService.swift
+            if let recommended = GPU.maxRecommendedWorkingSetBytes() {
+                MLX.Memory.cacheLimit = Int(Double(recommended) * 0.75)
+            }
             memoryLimitApplied = true
         }
 
@@ -131,9 +137,25 @@ actor WorkerRuntime {
             )
             loadedPath = url.path
             log.notice("model loaded: \(url.path, privacy: .public)")
+            // Warm up Metal shader pipelines so the first real request doesn't pay
+            // JIT compile cost. signerlabs/Klee LLMService.swift warmupMetalPipeline
+            await warmupMetalPipeline()
             Self.write(.init(event: MLXWorkerEvent.ready, requestId: cmd.requestId, modelPath: url.path), to: stdout)
         } catch {
             Self.write(.init(event: MLXWorkerEvent.error, requestId: cmd.requestId, message: error.localizedDescription), to: stdout)
+        }
+    }
+
+    private func warmupMetalPipeline() async {
+        guard let container else { return }
+        do {
+            let input = try await container.prepare(input: UserInput(prompt: .text("hi")))
+            let params = GenerateParameters(maxTokens: 2, temperature: 0.0)
+            let stream = try await container.generate(input: input, parameters: params)
+            for await _ in stream {}
+            log.notice("metal pipeline warmed up")
+        } catch {
+            log.warning("metal warmup failed (non-fatal): \(error.localizedDescription, privacy: .public)")
         }
     }
 
