@@ -95,6 +95,8 @@ if [ "$scenario" = "model-loaded" ]; then
   gen_bench_raw="$(echo '{"cmd":"generate","prompt":"Describe memory management on Apple Silicon in detail.","maxTokens":100}' \
     | nc -U "$SOCK" 2>/dev/null)"
   if [ -n "$gen_bench_raw" ]; then
+    # Метрики приходят в финальном IPCResponse (final=true) — поля promptTPS/decodeTPS/promptTokens/generatedTokens.
+    # Не ищем event=="done" (это raw MLXWorkerEvent, он не выходит за пределы supervisor'а).
     eval "$(echo "$gen_bench_raw" | python3 - <<'PY'
 import sys, json
 for line in sys.stdin:
@@ -102,7 +104,7 @@ for line in sys.stdin:
         ev = json.loads(line.strip())
     except Exception:
         continue
-    if ev.get("event") == "done":
+    if ev.get("final") is True:
         def fmt(v): return str(v) if v is not None else "null"
         print(f"prefill_tps={fmt(ev.get('promptTPS'))}")
         print(f"decode_tps={fmt(ev.get('decodeTPS'))}")

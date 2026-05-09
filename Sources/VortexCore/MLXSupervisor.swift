@@ -3,6 +3,12 @@ import Foundation
 import MLXWorkerProtocol
 import os
 
+/// Один элемент rich-потока генерации. `.text` — токен; `.done` — финальные метрики.
+public enum GenerateFragment: Sendable {
+    case text(String)
+    case done(promptTPS: Double?, decodeTPS: Double?, promptTokens: Int?, generatedTokens: Int?)
+}
+
 public enum MLXSupervisorError: Error, Sendable, CustomStringConvertible {
     case workerNotFound(String)
     case workerSpawnFailed(String)
@@ -233,10 +239,32 @@ public actor MLXSupervisor {
         return output
     }
 
+    /// Стриминг только текста — backward-compatible API.
     public nonisolated func generateStream(
         prompt: String,
         maxTokens: Int = 200
     ) -> AsyncThrowingStream<String, any Error> {
+        let full = generateStreamFull(prompt: prompt, maxTokens: maxTokens)
+        return AsyncThrowingStream { continuation in
+            let task = Task {
+                do {
+                    for try await fragment in full {
+                        if case .text(let t) = fragment { continuation.yield(t) }
+                    }
+                    continuation.finish()
+                } catch {
+                    continuation.finish(throwing: error)
+                }
+            }
+            continuation.onTermination = { _ in task.cancel() }
+        }
+    }
+
+    /// Rich-поток: токены как `.text`, финальные метрики как `.done`.
+    public nonisolated func generateStreamFull(
+        prompt: String,
+        maxTokens: Int = 200
+    ) -> AsyncThrowingStream<GenerateFragment, any Error> {
         AsyncThrowingStream { continuation in
             let task = Task {
                 do {
@@ -255,23 +283,17 @@ public actor MLXSupervisor {
     private func runGenerate(
         prompt: String,
         maxTokens: Int,
-        continuation: AsyncThrowingStream<String, any Error>.Continuation
+        continuation: AsyncThrowingStream<GenerateFragment, any Error>.Continuation
     ) async throws {
         guard isLoaded() else { throw MLXSupervisorError.modelNotLoaded }
 
-        // POI: от prompt-write до final-token (либо error). chunks_count в
-        // metadata позволяет видеть streaming-progress в Instruments.
         let poiId = Self.poi.makeSignpostID()
         let poiState = Self.poi.beginInterval(
             "mlx_generate", id: poiId, "max_tokens=\(maxTokens) prompt_chars=\(prompt.count)"
         )
         var chunkCount = 0
         defer {
-            Self.poi.endInterval(
-                "mlx_generate",
-                poiState,
-                "chunks=\(chunkCount) max_tokens=\(maxTokens)"
-            )
+            Self.poi.endInterval("mlx_generate", poiState, "chunks=\(chunkCount) max_tokens=\(maxTokens)")
         }
 
         let id = UUID().uuidString
@@ -283,15 +305,21 @@ public actor MLXSupervisor {
             case MLXWorkerEvent.chunk:
                 if let text = event.text {
                     chunkCount += 1
-                    continuation.yield(text)
+                    continuation.yield(.text(text))
                 }
             case MLXWorkerEvent.done:
                 if let decode = event.decodeTPS {
-                    let prompt = event.promptTokens.map { "\($0)" } ?? "?"
-                    let gen = event.generatedTokens.map { "\($0)" } ?? "?"
-                    let prefill = event.promptTPS.map { String(format: "%.1f", $0) } ?? "?"
-                    Self.log.notice("generate metrics: prompt=\(prompt)tok prefill=\(prefill)tok/s decode=\(String(format: "%.1f", decode))tok/s output=\(gen)tok")
+                    let ptok = event.promptTokens.map { "\($0)" } ?? "?"
+                    let gtok = event.generatedTokens.map { "\($0)" } ?? "?"
+                    let pfill = event.promptTPS.map { String(format: "%.1f", $0) } ?? "?"
+                    Self.log.notice("generate metrics: prompt=\(ptok)tok prefill=\(pfill)tok/s decode=\(String(format: "%.1f", decode))tok/s output=\(gtok)tok")
                 }
+                continuation.yield(.done(
+                    promptTPS: event.promptTPS,
+                    decodeTPS: event.decodeTPS,
+                    promptTokens: event.promptTokens,
+                    generatedTokens: event.generatedTokens
+                ))
                 return
             case MLXWorkerEvent.error:
                 throw MLXSupervisorError.generateFailed(event.message ?? "unknown")

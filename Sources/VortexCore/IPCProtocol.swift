@@ -70,6 +70,11 @@ public struct IPCResponse: Codable, Sendable {
     /// observability для cmd `pressure`. Без них непонятно, реально ли работает
     /// jetsam/machVM на конкретной машине.
     public var pageoutCounters: PageoutCounters?
+    /// Метрики генерации (KLEE-F) — только в финальном chunk'е generate/recap.
+    public var promptTPS: Double?
+    public var decodeTPS: Double?
+    public var promptTokens: Int?
+    public var generatedTokens: Int?
     /// Маркер «это последний chunk в стриме». Для one-shot ответов — true.
     /// Для streaming-промежуточных chunk'ов — false.
     public var final: Bool?

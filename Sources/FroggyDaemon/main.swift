@@ -504,20 +504,23 @@ struct DaemonIPCHandler: IPCRequestHandler, Sendable {
                 let task = Task {
                     do {
                         let prompt = await handlerSelf.augmentedPrompt(userPrompt, useContext: useContext)
-                        let mlxStream = await coordinator.mlx.generateStream(
+                        let mlxStream = await coordinator.mlx.generateStreamFull(
                             prompt: prompt, maxTokens: maxTokens
                         )
-                        for try await chunk in mlxStream {
-                            var r = IPCResponse()
-                            r.ok = true
-                            r.text = chunk
-                            r.final = false
-                            continuation.yield(r)
+                        for try await fragment in mlxStream {
+                            switch fragment {
+                            case .text(let chunk):
+                                var r = IPCResponse()
+                                r.ok = true; r.text = chunk; r.final = false
+                                continuation.yield(r)
+                            case .done(let pTPS, let dTPS, let pTok, let gTok):
+                                var done = IPCResponse()
+                                done.ok = true; done.final = true
+                                done.promptTPS = pTPS; done.decodeTPS = dTPS
+                                done.promptTokens = pTok; done.generatedTokens = gTok
+                                continuation.yield(done)
+                            }
                         }
-                        var done = IPCResponse()
-                        done.ok = true
-                        done.final = true
-                        continuation.yield(done)
                         continuation.finish()
                     } catch {
                         continuation.finish(throwing: error)
@@ -564,27 +567,34 @@ struct DaemonIPCHandler: IPCRequestHandler, Sendable {
                     ---
                     \(transcript.prefix(12000))
                     """
-                    let mlxStream = await coordinator.mlx.generateStream(prompt: prompt, maxTokens: 600)
+                    let mlxStream = await coordinator.mlx.generateStreamFull(prompt: prompt, maxTokens: 600)
                     var fullSummary = ""
                     do {
-                        for try await chunk in mlxStream {
-                            fullSummary += chunk
-                            var r = IPCResponse()
-                            r.ok = true; r.text = chunk; r.final = false
-                            continuation.yield(r)
+                        for try await fragment in mlxStream {
+                            switch fragment {
+                            case .text(let chunk):
+                                fullSummary += chunk
+                                var r = IPCResponse()
+                                r.ok = true; r.text = chunk; r.final = false
+                                continuation.yield(r)
+                            case .done(let pTPS, let dTPS, let pTok, let gTok):
+                                // Записываем секцию в файл
+                                if let fh = FileHandle(forUpdatingAtPath: sessionPath) {
+                                    fh.seekToEndOfFile()
+                                    fh.write(Data("\n## Summary\n\n\(fullSummary)\n".utf8))
+                                    try? fh.close()
+                                }
+                                var done = IPCResponse()
+                                done.ok = true; done.sessionURL = sessionPath; done.final = true
+                                done.promptTPS = pTPS; done.decodeTPS = dTPS
+                                done.promptTokens = pTok; done.generatedTokens = gTok
+                                continuation.yield(done)
+                            }
                         }
                     } catch {
                         continuation.finish(throwing: error); return
                     }
-                    // Записываем секцию в файл
-                    if let fh = FileHandle(forUpdatingAtPath: sessionPath) {
-                        fh.seekToEndOfFile()
-                        fh.write(Data("\n## Summary\n\n\(fullSummary)\n".utf8))
-                        try? fh.close()
-                    }
-                    var done = IPCResponse()
-                    done.ok = true; done.sessionURL = sessionPath; done.final = true
-                    continuation.yield(done); continuation.finish()
+                    continuation.finish()
                 }
                 continuation.onTermination = { _ in task.cancel() }
             }
