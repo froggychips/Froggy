@@ -181,12 +181,28 @@ actor WorkerRuntime {
                 temperature: temperature
             )
             let stream = try await container.generate(input: lmInput, parameters: params)
+            var completionInfo: GenerateCompletionInfo? = nil
             for await event in stream {
-                if case let .chunk(text) = event {
+                switch event {
+                case let .chunk(text):
                     Self.write(.init(event: MLXWorkerEvent.chunk, requestId: cmd.requestId, text: text), to: stdout)
+                case let .info(info):
+                    completionInfo = info
+                default:
+                    break
                 }
             }
-            Self.write(.init(event: MLXWorkerEvent.done, requestId: cmd.requestId), to: stdout)
+            if let info = completionInfo {
+                log.notice("generate done: prompt=\(info.promptTokenCount) tok prefill=\(String(format: "%.1f", info.promptTokensPerSecond)) tok/s decode=\(String(format: "%.1f", info.tokensPerSecond)) tok/s output=\(info.generationTokenCount) tok")
+            }
+            Self.write(.init(
+                event: MLXWorkerEvent.done,
+                requestId: cmd.requestId,
+                promptTPS: completionInfo?.promptTokensPerSecond,
+                decodeTPS: completionInfo?.tokensPerSecond,
+                promptTokens: completionInfo?.promptTokenCount,
+                generatedTokens: completionInfo?.generationTokenCount
+            ), to: stdout)
         } catch {
             Self.write(.init(event: MLXWorkerEvent.error, requestId: cmd.requestId, message: error.localizedDescription), to: stdout)
         }

@@ -286,6 +286,12 @@ public actor MLXSupervisor {
                     continuation.yield(text)
                 }
             case MLXWorkerEvent.done:
+                if let decode = event.decodeTPS {
+                    let prompt = event.promptTokens.map { "\($0)" } ?? "?"
+                    let gen = event.generatedTokens.map { "\($0)" } ?? "?"
+                    let prefill = event.promptTPS.map { String(format: "%.1f", $0) } ?? "?"
+                    Self.log.notice("generate metrics: prompt=\(prompt)tok prefill=\(prefill)tok/s decode=\(String(format: "%.1f", decode))tok/s output=\(gen)tok")
+                }
                 return
             case MLXWorkerEvent.error:
                 throw MLXSupervisorError.generateFailed(event.message ?? "unknown")
