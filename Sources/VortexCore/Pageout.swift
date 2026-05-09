@@ -38,6 +38,12 @@ public protocol PageoutImpl: Sendable {
 /// каждого «сорванного» уровня.
 public actor PageoutChain {
     private static let log = Logger(subsystem: "com.froggychips.froggy", category: "pageout")
+    /// Signposter для Instruments. Каждая попытка стратегии становится
+    /// interval на timeline'е, что закрывает validation-gate'овский
+    /// вопрос "какая стратегия реально срабатывает на этой машине"
+    /// (см. ADR 0007 / 0011).
+    private static let signposter = OSSignposter(subsystem: "com.froggychips.froggy", category: "pageout")
+    private static let poi = OSSignposter(subsystem: "com.froggychips.froggy", category: "PointsOfInterest")
 
     private let preferred: PageoutStrategy
     private let machVM: any PageoutImpl
@@ -73,16 +79,31 @@ public actor PageoutChain {
         }
 
         for (strategy, impl) in order {
+            // Interval per strategy attempt — видно в Instruments длительность
+            // и outcome (success/skipped/failed).
+            let id = Self.signposter.makeSignpostID()
+            let state = Self.signposter.beginInterval(
+                "pageout-attempt", id: id,
+                "strategy=\(strategy.rawValue, privacy: .public) pid=\(pid, privacy: .public)"
+            )
             counters.bump(strategy, .attempted)
             let outcome = await impl.pageout(pid: pid)
             switch outcome {
             case .success:
                 counters.bump(strategy, .succeeded)
+                Self.signposter.endInterval("pageout-attempt", state,
+                                             "outcome=success")
+                Self.poi.emitEvent("pageout_success",
+                                    "strategy=\(strategy.rawValue, privacy: .public) pid=\(pid, privacy: .public)")
                 return outcome
             case .skipped:
+                Self.signposter.endInterval("pageout-attempt", state,
+                                             "outcome=skipped")
                 return outcome
             case .failed(let reason):
                 counters.bump(strategy, .failed)
+                Self.signposter.endInterval("pageout-attempt", state,
+                                             "outcome=failed reason=\(reason, privacy: .public)")
                 if !loggedFailureFor.contains(strategy) {
                     loggedFailureFor.insert(strategy)
                     Self.log.warning("pageout strategy \(strategy.rawValue, privacy: .public) failed (\(reason, privacy: .public)); falling back")
