@@ -26,6 +26,21 @@ daemon, so you can drive it from any language.
 📬 Contact: [@froggychips](https://t.me/froggychips) on Telegram
 📜 License: [MIT](LICENSE)
 
+## Ecosystem
+
+| Companion | What it adds |
+|---|---|
+| [froggy-mcp](https://github.com/froggychips/froggy-mcp) | MCP server — gives Claude Code four tools to query Froggy directly over its Unix socket (screen context, local LLM, meeting transcripts, daemon status). No copy-paste. |
+
+```
+Claude Code  ←— stdio / MCP (JSON-RPC) —→  froggy-mcp  ←— Unix socket / JSON-line —→  Froggy daemon
+                 (cloud, powerful)                            (local, private, eyes-on)
+```
+
+Once `froggy-mcp` is registered, the cloud model can ask *"what's open on your screen right now?"*
+or *"summarise the last call"* — and Froggy answers from its local context without you copying
+anything. Heavy reasoning stays in the cloud; sensitive data never leaves the Mac.
+
 ## Features
 
 - **Reactive Dynamic RAM Recovery** — `MemoryPressureMonitor` listens
