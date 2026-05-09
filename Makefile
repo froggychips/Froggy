@@ -3,7 +3,7 @@
 # Без этого pre-build шага FroggyMLXWorker не может загрузить
 # ни одной MLX-модели в release-сборке через SwiftPM.
 
-.PHONY: build build-debug release test resolve metallib logbundle session-summary clean help
+.PHONY: build build-debug release smoke test full resolve metallib logbundle session-summary clean help
 
 # Default target: release build.
 build: release
@@ -20,11 +20,28 @@ build-debug: metallib
 	@cp Sources/FroggyMLXWorker/Resources/default.metallib .build/debug/Resources/default.metallib
 	@echo "metallib placed at .build/debug/Resources/default.metallib"
 
+# Тиры тестов. Pre-commit / fast-feedback гонит smoke; CI default — test;
+# full добавляет bench/ для редких pre-release прогонов.
+#
+# smoke — только pure unit'ы (~секунды). Без metallib, без сборки
+# FroggyMLXWorkerFake. Пропускаем integration-тесты supervisor↔worker
+# (требуют скомпилированный fake), metallib-presence (требует pre-build),
+# и pageout-бенчмарк (медленный).
+smoke: resolve
+	swift test \
+	    --skip MLXSupervisorIntegrationTests \
+	    --skip MLXWorkerMetallibPresenceTests \
+	    --skip PageoutBenchmarkTests
+
 # Полный test run. Mlx-swift checkout нужен (`resolve` делает это).
 test: resolve metallib
 	@mkdir -p .build/debug/Resources
 	@cp Sources/FroggyMLXWorker/Resources/default.metallib .build/debug/Resources/default.metallib 2>/dev/null || true
 	swift test
+
+# test + bench/. bench/run.sh держит свой baseline.json, см. bench/README.md.
+full: test
+	cd bench && ./run.sh
 
 # Только metallib. Idempotent, безопасно повторно.
 metallib: resolve
@@ -56,7 +73,9 @@ clean:
 help:
 	@echo "make build         — release build + post-build metallib copy (default)"
 	@echo "make build-debug   — debug build + post-build metallib copy"
+	@echo "make smoke         — быстрые unit'ы (~секунды), без metallib/integration"
 	@echo "make test          — swift test (нужен metallib для MLX-смок-тестов)"
+	@echo "make full          — test + bench/run.sh"
 	@echo "make metallib      — только пересобрать default.metallib"
 	@echo "make logbundle     — собрать froggy.logarchive для bug-report'а"
 	@echo "make session-summary — собрать session-bundle (log+SQLite+state+IPC+notes)"
