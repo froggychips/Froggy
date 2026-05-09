@@ -68,6 +68,9 @@ struct FroggyDaemon {
         }
         _ = freezeStats // ipc-handler ссылается отдельно
         let vortex = VortexActor(pidStore: pidStore, pageout: pageoutChain, ranker: ranker)
+        let audioWorkerURL = config.audioWorkerPath.map { URL(fileURLWithPath: $0) }
+        let audioSupervisor = AudioSupervisor(workerExecutableURL: audioWorkerURL)
+
         let workerURL = config.mlxWorkerPath.map { URL(fileURLWithPath: $0) }
         let mlx = MLXSupervisor(
             memoryLimitBytes: config.gpuMemoryLimitBytes,
@@ -93,7 +96,9 @@ struct FroggyDaemon {
             tier1BundleIds: config.freezeTier1BundleIds,
             tier2BundleIds: config.freezeTier2BundleIds,
             finder: reactiveFinder,
-            workspaceSource: workspaceSource
+            workspaceSource: workspaceSource,
+            callModelPath: config.callModelPath,
+            mainModelPath: config.modelPath
         )
         await coordinator.startMonitoring()
         // Termination-watcher: чистит FrozenPidsStore при внешнем kill'е.
@@ -152,7 +157,8 @@ struct FroggyDaemon {
             registry: registry,
             augmenter: PromptAugmenter(maxContextChars: config.contextMaxChars),
             freezeStats: freezeStats,
-            defaultContextChars: config.contextMaxChars
+            defaultContextChars: config.contextMaxChars,
+            audioSupervisor: audioSupervisor
         )
         let ipc = IPCServer(socketPath: config.ipcSocketPath, handler: handler)
         do {
@@ -260,6 +266,7 @@ struct DaemonIPCHandler: IPCRequestHandler, Sendable {
     let augmenter: PromptAugmenter
     let freezeStats: FreezeStatsStore?
     let defaultContextChars: Int
+    let audioSupervisor: AudioSupervisor
 
     /// Если useContext == true, оборачиваем prompt в шаблон с свежим контекстом.
     private func augmentedPrompt(_ prompt: String, useContext: Bool?) async -> String {
@@ -372,6 +379,51 @@ struct DaemonIPCHandler: IPCRequestHandler, Sendable {
             await vortex.thawAll()
             return .success()
 
+        case "listen":
+            // Swap на маленькую модель если callModelPath задан
+            let callPath = coordinator.callModelPath
+            if let callPath, await coordinator.mlx.currentModelPath() != callPath {
+                do {
+                    try await coordinator.loadModel(modelPath: callPath)
+                } catch {
+                    return .failure("model swap to callModelPath failed: \(error)")
+                }
+            }
+            do {
+                try await audioSupervisor.startCapture(discordPid: request.discordPid)
+                var r = IPCResponse()
+                r.ok = true
+                r.listening = true
+                r.final = true
+                return r
+            } catch {
+                return .failure("listen failed: \(error)")
+            }
+
+        case "listenStop":
+            await audioSupervisor.stopCapture()
+            // Swap обратно на основную модель если callModelPath был другой
+            let mainPath = coordinator.mainModelPath
+            if let mainPath, await coordinator.mlx.currentModelPath() != mainPath {
+                do {
+                    try await coordinator.loadModel(modelPath: mainPath)
+                } catch {
+                    // не fatal — summary всё равно попробуем
+                }
+            }
+            var r = IPCResponse()
+            r.ok = true
+            r.listening = false
+            r.final = true
+            return r
+
+        case "listenStatus":
+            var r = IPCResponse()
+            r.ok = true
+            r.listening = await audioSupervisor.isCapturing()
+            r.final = true
+            return r
+
         case "pressure":
             let snap = await coordinator.pressureSnapshot()
             var r = IPCResponse()
@@ -405,44 +457,64 @@ struct DaemonIPCHandler: IPCRequestHandler, Sendable {
         }
     }
 
-    /// Streaming-путь: только для команды `generate`. Каждый chunk
-    /// токена идёт в свой IPCResponse, последний — с `final: true`.
     func handleStream(_ request: IPCRequest) -> AsyncThrowingStream<IPCResponse, any Error>? {
-        guard request.cmd == "generate" else { return nil }
-        // Если prompt отсутствует — обработаем через one-shot путь, чтобы
-        // не дублировать логику ошибок.
-        guard request.prompt != nil else { return nil }
+        switch request.cmd {
+        case "generate":
+            guard request.prompt != nil else { return nil }
+            let userPrompt = request.prompt!
+            let maxTokens = request.maxTokens ?? 200
+            let coordinator = self.coordinator
+            let useContext = request.useContext
+            let handlerSelf = self
+            return AsyncThrowingStream { continuation in
+                let task = Task {
+                    do {
+                        let prompt = await handlerSelf.augmentedPrompt(userPrompt, useContext: useContext)
+                        let mlxStream = await coordinator.mlx.generateStream(
+                            prompt: prompt, maxTokens: maxTokens
+                        )
+                        for try await chunk in mlxStream {
+                            var r = IPCResponse()
+                            r.ok = true
+                            r.text = chunk
+                            r.final = false
+                            continuation.yield(r)
+                        }
+                        var done = IPCResponse()
+                        done.ok = true
+                        done.final = true
+                        continuation.yield(done)
+                        continuation.finish()
+                    } catch {
+                        continuation.finish(throwing: error)
+                    }
+                }
+                continuation.onTermination = { _ in task.cancel() }
+            }
 
-        let userPrompt = request.prompt!
-        let maxTokens = request.maxTokens ?? 200
-        let coordinator = self.coordinator
-        let useContext = request.useContext
-        let handlerSelf = self
-
-        return AsyncThrowingStream { continuation in
-            let task = Task {
-                do {
-                    let prompt = await handlerSelf.augmentedPrompt(userPrompt, useContext: useContext)
-                    let mlxStream = await coordinator.mlx.generateStream(
-                        prompt: prompt, maxTokens: maxTokens
-                    )
-                    for try await chunk in mlxStream {
+        case "listenStream":
+            let supervisor = self.audioSupervisor
+            return AsyncThrowingStream { continuation in
+                let task = Task {
+                    let (stream, subID) = await supervisor.subscribeToTranscripts()
+                    continuation.onTermination = { @Sendable _ in
+                        Task { await supervisor.unsubscribe(id: subID) }
+                    }
+                    for await event in stream {
                         var r = IPCResponse()
                         r.ok = true
-                        r.text = chunk
-                        r.final = false
+                        r.text = event.text
+                        r.speaker = event.speaker
+                        r.final = event.isFinal
                         continuation.yield(r)
                     }
-                    var done = IPCResponse()
-                    done.ok = true
-                    done.final = true
-                    continuation.yield(done)
                     continuation.finish()
-                } catch {
-                    continuation.finish(throwing: error)
                 }
+                continuation.onTermination = { _ in task.cancel() }
             }
-            continuation.onTermination = { _ in task.cancel() }
+
+        default:
+            return nil
         }
     }
 }

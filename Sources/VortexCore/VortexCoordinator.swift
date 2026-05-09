@@ -23,6 +23,12 @@ public actor VortexCoordinator: WorkspaceTerminationWatcher.Sink {
     public let vortex: any VortexFreezing
     public let monitor: MemoryPressureMonitor
 
+    /// Маленькая модель для режима созвона (callModelPath из конфига).
+    /// nonisolated — доступ без await из IPC-хэндлеров.
+    public nonisolated let callModelPath: String?
+    /// Основная модель (config.modelPath) — для swap-back после listenStop.
+    public nonisolated let mainModelPath: String?
+
     private let finder: any ProcessFinder
     private let workspaceSource: (any WorkspaceEventSource)?
     private let tier1BundleIds: [String]
@@ -59,7 +65,9 @@ public actor VortexCoordinator: WorkspaceTerminationWatcher.Sink {
         tier2BundleIds: [String],
         finder: any ProcessFinder = NSWorkspaceProcessFinder(),
         workspaceSource: (any WorkspaceEventSource)? = nil,
-        gradualThawDelaySeconds: TimeInterval = 10
+        gradualThawDelaySeconds: TimeInterval = 10,
+        callModelPath: String? = nil,
+        mainModelPath: String? = nil
     ) {
         self.mlx = mlx
         self.vortex = vortex
@@ -69,6 +77,8 @@ public actor VortexCoordinator: WorkspaceTerminationWatcher.Sink {
         self.finder = finder
         self.workspaceSource = workspaceSource
         self.gradualThawDelaySeconds = gradualThawDelaySeconds
+        self.callModelPath = callModelPath
+        self.mainModelPath = mainModelPath
     }
 
     // MARK: - Lifecycle
