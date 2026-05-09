@@ -28,6 +28,10 @@ public actor VortexCoordinator: WorkspaceTerminationWatcher.Sink {
     public nonisolated let callModelPath: String?
     /// Основная модель (config.modelPath) — для swap-back после listenStop.
     public nonisolated let mainModelPath: String?
+    /// BCP-47 locale для SFSpeechRecognizer.
+    public nonisolated let audioLocale: String
+    /// Только on-device SR (не отправлять аудио в Apple cloud).
+    public nonisolated let audioOnDeviceRecognition: Bool
 
     private let finder: any ProcessFinder
     private let workspaceSource: (any WorkspaceEventSource)?
@@ -67,7 +71,9 @@ public actor VortexCoordinator: WorkspaceTerminationWatcher.Sink {
         workspaceSource: (any WorkspaceEventSource)? = nil,
         gradualThawDelaySeconds: TimeInterval = 10,
         callModelPath: String? = nil,
-        mainModelPath: String? = nil
+        mainModelPath: String? = nil,
+        audioLocale: String = "ru-RU",
+        audioOnDeviceRecognition: Bool = true
     ) {
         self.mlx = mlx
         self.vortex = vortex
@@ -79,6 +85,8 @@ public actor VortexCoordinator: WorkspaceTerminationWatcher.Sink {
         self.gradualThawDelaySeconds = gradualThawDelaySeconds
         self.callModelPath = callModelPath
         self.mainModelPath = mainModelPath
+        self.audioLocale = audioLocale
+        self.audioOnDeviceRecognition = audioOnDeviceRecognition
     }
 
     // MARK: - Lifecycle

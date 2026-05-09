@@ -115,8 +115,11 @@ final class AudioRuntime: @unchecked Sendable {
 
         case AudioWorkerCommand.startCapture:
             let pid = cmd.discordPid ?? defaultDiscordPid
+            let locale = cmd.locale ?? "ru-RU"
+            let onDevice = cmd.onDeviceRecognition ?? true
             DispatchQueue.main.async { [weak self] in
-                self?.startCapture(discordPid: pid, requestId: cmd.requestId)
+                self?.startCapture(discordPid: pid, requestId: cmd.requestId,
+                                   locale: locale, onDeviceRecognition: onDevice)
             }
 
         case AudioWorkerCommand.stopCapture:
@@ -140,10 +143,10 @@ final class AudioRuntime: @unchecked Sendable {
 
     // MARK: - Capture lifecycle (main thread)
 
-    private func startCapture(discordPid: Int32?, requestId: String?) {
+    private func startCapture(discordPid: Int32?, requestId: String?, locale: String, onDeviceRecognition: Bool) {
         stopCapture() // clean slate
 
-        recognizer = SFSpeechRecognizer(locale: Locale(identifier: "ru-RU"))
+        recognizer = SFSpeechRecognizer(locale: Locale(identifier: locale))
         recognizer?.defaultTaskHint = .dictation
 
         guard let recognizer, recognizer.isAvailable else {
@@ -158,7 +161,8 @@ final class AudioRuntime: @unchecked Sendable {
                 let (tapAggDeviceID, tapAggTapID) = try createDiscordTap(pid: pid)
                 self.tapID = tapAggTapID
                 self.aggregateDeviceID = tapAggDeviceID
-                startDiscordEngine(aggregateDeviceID: tapAggDeviceID, recognizer: recognizer)
+                startDiscordEngine(aggregateDeviceID: tapAggDeviceID, recognizer: recognizer,
+                                   onDeviceRecognition: onDeviceRecognition)
             } catch {
                 log.error("discord tap failed: \(error.localizedDescription, privacy: .public)")
                 write(.init(event: AudioWorkerEvent.error, requestId: requestId,
@@ -171,7 +175,7 @@ final class AudioRuntime: @unchecked Sendable {
         }
 
         // --- Mic ---
-        startMicEngine(recognizer: recognizer)
+        startMicEngine(recognizer: recognizer, onDeviceRecognition: onDeviceRecognition)
 
         write(.init(event: AudioWorkerEvent.ready, requestId: requestId))
         log.notice("capture started discord_pid=\(discordPid.map(String.init) ?? "none")")
@@ -208,7 +212,7 @@ final class AudioRuntime: @unchecked Sendable {
     // MARK: - Discord tap engine (main thread)
 
     @available(macOS 14.2, *)
-    private func startDiscordEngine(aggregateDeviceID: AudioDeviceID, recognizer: SFSpeechRecognizer) {
+    private func startDiscordEngine(aggregateDeviceID: AudioDeviceID, recognizer: SFSpeechRecognizer, onDeviceRecognition: Bool) {
         let discordEngine = AVAudioEngine()
         self.discordEngine = discordEngine
 
@@ -227,7 +231,7 @@ final class AudioRuntime: @unchecked Sendable {
 
         let req = SFSpeechAudioBufferRecognitionRequest()
         req.shouldReportPartialResults = true
-        req.requiresOnDeviceRecognition = false
+        req.requiresOnDeviceRecognition = onDeviceRecognition
         self.discordRequest = req
 
         let format = inputNode.outputFormat(forBus: 0)
@@ -289,14 +293,14 @@ final class AudioRuntime: @unchecked Sendable {
 
     // MARK: - Mic engine (main thread)
 
-    private func startMicEngine(recognizer: SFSpeechRecognizer) {
+    private func startMicEngine(recognizer: SFSpeechRecognizer, onDeviceRecognition: Bool) {
         let micEngine = AVAudioEngine()
         let inputNode = micEngine.inputNode
         let format = inputNode.outputFormat(forBus: 0)
 
         let req = SFSpeechAudioBufferRecognitionRequest()
         req.shouldReportPartialResults = true
-        req.requiresOnDeviceRecognition = false
+        req.requiresOnDeviceRecognition = onDeviceRecognition
         self.micRequest = req
 
         inputNode.installTap(onBus: 0, bufferSize: 4096, format: format) { [weak req] buffer, _ in

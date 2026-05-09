@@ -1,4 +1,5 @@
 import AudioWorkerProtocol
+import CoreAudio
 import Darwin
 import Foundation
 import os
@@ -70,22 +71,31 @@ public actor AudioSupervisor {
     }
 
     /// Запускает запись: spawn worker'а (если нет) + startCapture команда.
-    public func startCapture(discordPid: Int32?) async throws {
+    public func startCapture(
+        discordPid: Int32?,
+        locale: String = "ru-RU",
+        onDeviceRecognition: Bool = true
+    ) async throws {
         try ensureWorkerSpawned()
 
         let id = UUID().uuidString
         try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Void, any Error>) in
             self.pendingRequests[id] = cont
             do {
-                try self.sendCommand(.init(cmd: AudioWorkerCommand.startCapture,
-                                          discordPid: discordPid, requestId: id))
+                try self.sendCommand(.init(
+                    cmd: AudioWorkerCommand.startCapture,
+                    discordPid: discordPid,
+                    requestId: id,
+                    locale: locale,
+                    onDeviceRecognition: onDeviceRecognition
+                ))
             } catch {
                 self.pendingRequests.removeValue(forKey: id)
                 cont.resume(throwing: error)
             }
         }
         capturing = true
-        Self.log.notice("audio capture started discord_pid=\(discordPid.map(String.init) ?? "none")")
+        Self.log.notice("audio capture started discord_pid=\(discordPid.map(String.init) ?? "none") locale=\(locale) onDevice=\(onDeviceRecognition)")
     }
 
     /// Останавливает запись. Worker остаётся жить (готов к следующей сессии).
@@ -222,6 +232,44 @@ public actor AudioSupervisor {
     }
 
     // MARK: - Utilities
+
+    // MARK: - Audio device info (nonisolated, CoreAudio query)
+
+    /// Имя текущего дефолтного output-устройства (AirPods, MacBook Speakers, …).
+    /// nil если CoreAudio вернул ошибку.
+    public nonisolated static func currentOutputDeviceName() -> String? {
+        defaultDeviceName(selector: kAudioHardwarePropertyDefaultOutputDevice)
+    }
+
+    /// Имя текущего дефолтного input-устройства (Built-in Microphone, AirPods, …).
+    public nonisolated static func currentInputDeviceName() -> String? {
+        defaultDeviceName(selector: kAudioHardwarePropertyDefaultInputDevice)
+    }
+
+    private nonisolated static func defaultDeviceName(selector: AudioObjectPropertySelector) -> String? {
+        var deviceID = AudioDeviceID(kAudioObjectUnknown)
+        var prop = AudioObjectPropertyAddress(
+            mSelector: selector,
+            mScope: AudioObjectPropertyScope(kAudioObjectPropertyScopeGlobal),
+            mElement: AudioObjectPropertyElement(kAudioObjectPropertyElementMain)
+        )
+        var size = UInt32(MemoryLayout<AudioDeviceID>.size)
+        guard AudioObjectGetPropertyData(
+            AudioObjectID(kAudioObjectSystemObject), &prop, 0, nil, &size, &deviceID
+        ) == noErr, deviceID != AudioObjectID(kAudioObjectUnknown) else { return nil }
+
+        var nameProp = AudioObjectPropertyAddress(
+            mSelector: AudioObjectPropertySelector(kAudioDevicePropertyDeviceNameCFString),
+            mScope: AudioObjectPropertyScope(kAudioObjectPropertyScopeGlobal),
+            mElement: AudioObjectPropertyElement(kAudioObjectPropertyElementMain)
+        )
+        var name: CFString = "" as CFString
+        var nameSize = UInt32(MemoryLayout<CFString>.size)
+        guard AudioObjectGetPropertyData(deviceID, &nameProp, 0, nil, &nameSize, &name) == noErr else {
+            return nil
+        }
+        return name as String
+    }
 
     private static func waitForExit(_ proc: Process, timeout: Duration) async -> Bool {
         let pid = proc.processIdentifier
