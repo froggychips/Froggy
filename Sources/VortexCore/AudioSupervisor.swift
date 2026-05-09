@@ -59,6 +59,15 @@ public actor AudioSupervisor {
     /// URL markdown-файла последней/текущей сессии. nil если сессий не было.
     public func sessionURL() -> URL? { lastSessionURL ?? sessionStore?.url }
 
+    /// Добавляет произвольный контекстный блок в текущую сессию.
+    /// Возвращает false если сессия не активна.
+    @discardableResult
+    public func appendContext(_ text: String, title: String = "Injected Context") -> Bool {
+        guard let store = sessionStore else { return false }
+        Task { await store.appendSection(title: title, content: text) }
+        return true
+    }
+
     /// Подписывается на поток транскрипта. Возвращает AsyncStream и ID подписки.
     /// Вызови `unsubscribe(id:)` когда клиент отключился, иначе continuation утечёт.
     public func subscribeToTranscripts() -> (AsyncStream<TranscriptEvent>, UUID) {
