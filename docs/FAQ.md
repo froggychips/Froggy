@@ -1,117 +1,117 @@
 # Froggy — FAQ
 
-Ответы на вопросы, которые задают люди у которых нет времени читать THESIS и ADR.
+Quick answers for people who don't have time to read THESIS and the ADRs.
 
 ---
 
-## Что вообще делает Froggy?
+## What does Froggy actually do?
 
-Две вещи, работающие вместе:
+Two things working together:
 
-**1. Управление памятью.** Froggy смотрит на давление unified memory в реальном времени. Когда оно растёт — замораживает фоновые приложения (Spotify, Discord, Telegram) через `SIGSTOP`, принудительно выгружает их страницы в swap, и RAM освобождается для LLM. Когда давление спадает — размораживает обратно. Приложения не знают, что это произошло.
+**1. Memory management.** Froggy monitors unified memory pressure in real time. When pressure rises, it freezes background apps (Spotify, Discord, Telegram) via `SIGSTOP`, forces their pages out to swap, and frees up RAM for the LLM. When pressure drops, it thaws them. The apps never know it happened.
 
-**2. Контекст с экрана.** Каждые 2 секунды Froggy делает скриншот через ScreenCaptureKit, запускает Vision OCR локально, вырезает секреты (пароли, токены, ключи API), и держит последние 30 снапшотов в памяти. Можно спросить у модели «что у меня на экране?» — и она видит.
-
----
-
-## Что Froggy НЕ делает
-
-- **Не хранит историю.** Нет базы данных, нет поиска по прошлой активности. 30 снапшотов в памяти — и всё, при перезапуске обнуляется. Если хочешь историю экрана — смотри на [Rewind](https://www.rewind.ai/) (они делают это хорошо).
-- **Не заменяет ChatGPT/Claude.** Froggy запускает маленькие модели (3–4B), которые умещаются в 8 GB. Они хорошо справляются с локальными задачами, но не тягаются с большими облачными моделями на сложных вопросах.
-- **Не помогает, если у тебя 16+ GB RAM.** Весь смысл в агрессивном управлении памятью для тех, у кого её мало. Если у тебя M3 Max с 36 GB — просто используй Ollama напрямую.
-- **Не работает на Intel Macs.** Unified memory — это архитектура Apple Silicon. Intel — out of scope.
-- **Не продукт с установщиком.** Нужно собрать из исходников (`make build`). Никакого `.dmg`, никаких авто-обновлений.
+**2. Screen context.** Every 2 seconds Froggy captures a screenshot via ScreenCaptureKit, runs Vision OCR on-device, strips secrets (passwords, tokens, API keys), and keeps the last 30 snapshots in memory. Ask the model "what's on my screen?" and it sees.
 
 ---
 
-## Мой Mac тормозит когда я запускаю Ollama. Поможет Froggy?
+## What Froggy does NOT do
 
-Зависит от причины.
-
-**Если проблема — конкуренция за RAM** (браузер + Slack + Spotify + Ollama одновременно) — да, именно это Froggy и решает. Он заморозит фоновые приложения, пока Ollama инферирует, и разморозит когда RAM освободится.
-
-**Если модель просто не помещается в 8 GB** — нет инструмента, который это починит. Используй модель поменьше: Qwen3-4B-4bit, Gemma-3B-4bit, Phi-3.5-mini-4bit — все работают в 8 GB.
+- **No history.** No database, no search over past activity. 30 snapshots in memory — that's it, cleared on restart. If you want a screen history, check out [Rewind](https://www.rewind.ai/) — they do that well.
+- **Not a replacement for ChatGPT/Claude.** Froggy runs small models (3–4B) that fit in 8 GB. They handle local tasks well but don't compete with large cloud models on hard questions.
+- **Not useful if you have 16+ GB RAM.** The whole point is aggressive memory management for memory-constrained machines. If you have an M3 Max with 36 GB, just use Ollama directly.
+- **Doesn't run on Intel Macs.** Unified memory is an Apple Silicon architecture. Intel is out of scope by design.
+- **Not a packaged product.** You build from source (`make build`). No `.dmg`, no auto-updates.
 
 ---
 
-## Мой экран постоянно записывается?
+## My Mac slows down when I run Ollama. Will Froggy help?
 
-Скриншоты делаются каждые 2 секунды (настраивается), но **не сохраняются на диск**. Путь данных:
+Depends on why.
+
+**If the problem is RAM contention** — browser + Slack + Spotify + Ollama all running at once — yes, that's exactly what Froggy solves. It will freeze background apps while Ollama infers and thaw them when RAM is freed.
+
+**If the model simply doesn't fit in 8 GB**, no tool will fix that. Use a smaller model: Qwen3-4B-4bit, Gemma-3B-4bit, Phi-3.5-mini-4bit — all run in 8 GB.
+
+---
+
+## Is my screen being recorded continuously?
+
+Screenshots are taken every 2 seconds (configurable), but **nothing is written to disk**. The data path is:
 
 ```
-Скриншот → OCR (текст) → Redactor (вырезает секреты) → память (30 снапшотов)
+Screenshot → OCR (text) → Redactor (strips secrets) → memory (30 snapshots)
 ```
 
-Когда демон останавливается — буфер исчезает. Никакого видео, никакой SQLite с историей экрана.
+When the daemon stops, the buffer is gone. No video, no SQLite with screen history.
 
-Redactor вырезает: AWS ключи, GitHub PAT, Anthropic/OpenAI/Slack токены, JWT, bearer-заголовки, `password=`/`api_key=`/`secret=` значения, номера банковских карт (Luhn-валидация).
-
----
-
-## Это отправляет мой экран в облако?
-
-Нет. Всё локально: OCR через Apple Vision, инференс через MLX. Ничего не уходит с машины, если ты явно не настроишь что-то другое.
+The redactor strips: AWS keys, GitHub PATs, Anthropic/OpenAI/Slack tokens, JWTs, bearer headers, `password=`/`api_key=`/`secret=` values, and credit card numbers (Luhn-validated).
 
 ---
 
-## Можно использовать Froggy с Ollama?
+## Does this send my screen to the cloud?
 
-Да. Запусти демон без модели — он будет работать только как менеджер памяти:
+No. Everything is local: OCR via Apple Vision, inference via MLX. Nothing leaves the machine unless you explicitly configure otherwise.
+
+---
+
+## Can I use Froggy with Ollama?
+
+Yes. Run the daemon without a model — it will operate as a memory manager only:
 
 ```sh
 .build/release/FroggyDaemon
-# Без --model-path. Весит ~50 МБ, вся логика freeze/thaw работает.
+# No --model-path. ~50 MB footprint, full freeze/thaw logic active.
 ```
 
-Ollama при этом выиграет: когда RAM поджимает, Froggy заморозит Slack и Discord, чтобы освободить место для Ollama. Загрузить MLX-модель можно потом через `froggy load <path>`, если понадобится.
+Ollama benefits: when RAM gets tight, Froggy freezes Slack and Discord to make room for Ollama. You can load an MLX model later via `froggy load <path>` if you need one.
 
 ---
 
-## Какие модели поддерживаются?
+## Which models are supported?
 
-Любая MLX-модель с HuggingFace, которая помещается в RAM. Для 8 GB:
+Any MLX model from HuggingFace that fits in RAM. For 8 GB:
 
-| Модель | Размер в RAM | Ссылка |
+| Model | RAM footprint | Link |
 |---|---|---|
 | Qwen3-4B-4bit | ~2.5 GB | mlx-community/Qwen3-4B-4bit |
 | Gemma-3-4B-4bit | ~2.5 GB | mlx-community/gemma-3-4b-it-4bit |
 | Phi-3.5-mini-4bit | ~2.2 GB | mlx-community/Phi-3.5-mini-instruct-4bit |
 | Llama-3.2-3B-4bit | ~1.8 GB | mlx-community/Llama-3.2-3B-Instruct-4bit |
 
-Froggy использует 8-bit KV-cache по умолчанию (ADR-0009) — это примерно вдвое уменьшает память KV-кеша на длинных промптах.
+Froggy uses an 8-bit KV cache by default (ADR-0009), which roughly halves KV cache memory on long prompts.
 
 ---
 
-## Нужно знать Swift, чтобы пользоваться?
+## Do I need to know Swift to use it?
 
-**Для использования — нет.** Один раз собрал (`make build`), настроил `config.json`, запустил. Дальше через CLI (`froggy gen`, `froggy status`) или через любой язык по Unix-сокету JSON.
+**To use it — no.** Build once (`make build`), configure `config.json`, run. From there it's CLI (`froggy gen`, `froggy status`) or any language over the Unix-socket JSON IPC.
 
-**Для понимания кода — да**, это Swift 6 с strict concurrency. Код задизайнен как читаемый референс — ADR документирует каждое нетривиальное решение.
+**To read the code — yes**, it's Swift 6 with strict concurrency. The codebase is designed as a readable reference — every non-obvious decision is documented in an ADR.
 
 ---
 
-## В чём разница с Rewind / Granola / Pi?
+## How is this different from Rewind / Granola / Pi?
 
-Froggy не конкурент этим продуктам. Коротко:
+Froggy is not a competitor to those products. Quick comparison:
 
 | | Rewind / Granola | Pi | Froggy |
 |---|---|---|---|
-| Модель | Облако (OpenAI/Anthropic) | Облако | Локально, on-device |
-| История | Месяцами, поиск | Нет | 30 снапшотов в памяти |
-| RAM | Не ограничена | Не ограничена | Специально для 8 GB |
-| Продукт | Да, с установщиком | Да | Нет, personal scaffold |
-| Конфиденциальность | Экран в облако | Диалог в облако | Ничего за пределы машины |
+| Inference | Cloud (OpenAI/Anthropic) | Cloud | Local, on-device |
+| History | Months, searchable | None | 30 snapshots in memory |
+| RAM | Unconstrained | Unconstrained | Designed for 8 GB |
+| Product | Yes, with installer | Yes | No, personal scaffold |
+| Privacy | Screen goes to cloud | Conversation goes to cloud | Nothing leaves the machine |
 
-Если хочешь поиск по истории экрана — используй Rewind. Если хочешь локальный LLM на 8 GB без OOM — Froggy.
-
----
-
-## Насколько это стабильно?
-
-Автор использует Froggy ежедневно для реальных задач — это критерий #1 по [THESIS](THESIS.md). Но это личный проект, не продукт с SLA. IPC-протокол может меняться между версиями. Не используй в production-инфраструктуре.
+If you want searchable screen history, use Rewind. If you want a local LLM on 8 GB without OOM, use Froggy.
 
 ---
 
-## Где сообщить о баге?
+## How stable is it?
 
-[GitHub Issues](https://github.com/froggychips/Froggy/issues) или Telegram [@froggychips](https://t.me/froggychips).
+The author uses Froggy daily for real tasks — that's success criterion #1 per [THESIS](THESIS.md). But this is a personal project, not a product with an SLA. The IPC protocol may change between versions. Don't use it in production infrastructure.
+
+---
+
+## Where do I report a bug?
+
+[GitHub Issues](https://github.com/froggychips/Froggy/issues) or Telegram [@froggychips](https://t.me/froggychips).
