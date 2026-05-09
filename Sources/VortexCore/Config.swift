@@ -46,6 +46,15 @@ public struct FroggyConfig: Codable, Sendable, Equatable {
     /// По умолчанию true — приватность важнее accuracy на рабочих созвонах.
     public var audioOnDeviceRecognition: Bool
 
+    /// Подавлять микрофон пока Discord-тап слышит аудио (echo suppression).
+    /// Актуально при встроенных динамиках — без этого mic транскрибирует
+    /// и голос собеседника из колонок тоже.
+    public var echoSuppressionEnabled: Bool
+
+    /// Сколько мс держать mic-gate после последнего Discord-аудио.
+    /// 400ms покрывает комнатный реверб + задержку микрофона.
+    public var echoSuppressionTailMs: Int
+
     /// Mem-5 этап 1: собирать ли телеметрию freeze/thaw в SQLite.
     /// На этапе 1 мы только пишем; ranking-overlay пойдёт отдельным PR'ом.
     /// См. ADR 0010.
@@ -82,6 +91,8 @@ public struct FroggyConfig: Codable, Sendable, Equatable {
         audioWorkerPath: String? = nil,
         audioLocale: String = "ru-RU",
         audioOnDeviceRecognition: Bool = true,
+        echoSuppressionEnabled: Bool = true,
+        echoSuppressionTailMs: Int = 400,
         freezeRankingEnabled: Bool = true,
         kvCacheBits: Int = 8,
         ipcSocketPath: String = FroggyConfig.defaultSocketPath,
@@ -105,6 +116,8 @@ public struct FroggyConfig: Codable, Sendable, Equatable {
         self.audioWorkerPath = audioWorkerPath
         self.audioLocale = audioLocale
         self.audioOnDeviceRecognition = audioOnDeviceRecognition
+        self.echoSuppressionEnabled = echoSuppressionEnabled
+        self.echoSuppressionTailMs = echoSuppressionTailMs
         self.freezeRankingEnabled = freezeRankingEnabled
         self.kvCacheBits = kvCacheBits
         self.ipcSocketPath = ipcSocketPath
@@ -170,6 +183,8 @@ public struct FroggyConfig: Codable, Sendable, Equatable {
         self.audioWorkerPath = try c.decodeIfPresent(String.self, forKey: .audioWorkerPath)
         self.audioLocale = try c.decodeIfPresent(String.self, forKey: .audioLocale) ?? d.audioLocale
         self.audioOnDeviceRecognition = try c.decodeIfPresent(Bool.self, forKey: .audioOnDeviceRecognition) ?? d.audioOnDeviceRecognition
+        self.echoSuppressionEnabled = try c.decodeIfPresent(Bool.self, forKey: .echoSuppressionEnabled) ?? d.echoSuppressionEnabled
+        self.echoSuppressionTailMs = try c.decodeIfPresent(Int.self, forKey: .echoSuppressionTailMs) ?? d.echoSuppressionTailMs
         self.kvCacheBits = try c.decodeIfPresent(Int.self, forKey: .kvCacheBits) ?? d.kvCacheBits
 
         self.ipcSocketPath = try c.decodeIfPresent(String.self, forKey: .ipcSocketPath) ?? d.ipcSocketPath

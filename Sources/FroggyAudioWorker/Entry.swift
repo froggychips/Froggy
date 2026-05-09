@@ -1,3 +1,4 @@
+import Accelerate
 import AudioToolbox
 import AudioWorkerProtocol
 import AVFoundation
@@ -66,6 +67,16 @@ final class AudioRuntime: @unchecked Sendable {
     private var micRequest: SFSpeechAudioBufferRecognitionRequest?
     private var micTask: SFSpeechRecognitionTask?
 
+    // Echo suppression
+    // Записываются из main thread в startCapture, читаются из audio render thread
+    // в tap-callback'ах. Double-запись на arm64 атомарна; race здесь безвреден.
+    private var echoSuppressionEnabled = false
+    private var echoTailSeconds: TimeInterval = 0.4
+    /// Монотонное время (ProcessInfo.systemUptime) последнего активного Discord-буфера.
+    private var lastDiscordAudioTime: TimeInterval = -.infinity
+    /// Порог RMS (~-46 dBFS) — ниже считаем тишиной Discord.
+    private let echoRmsThreshold: Float = 0.005
+
     init(log: Logger, defaultDiscordPid: Int32?) {
         self.log = log
         self.defaultDiscordPid = defaultDiscordPid
@@ -117,9 +128,12 @@ final class AudioRuntime: @unchecked Sendable {
             let pid = cmd.discordPid ?? defaultDiscordPid
             let locale = cmd.locale ?? "ru-RU"
             let onDevice = cmd.onDeviceRecognition ?? true
+            let echoEnabled = cmd.echoSuppression ?? true
+            let echoTailMs = cmd.echoSuppressionTailMs ?? 400
             DispatchQueue.main.async { [weak self] in
                 self?.startCapture(discordPid: pid, requestId: cmd.requestId,
-                                   locale: locale, onDeviceRecognition: onDevice)
+                                   locale: locale, onDeviceRecognition: onDevice,
+                                   echoSuppression: echoEnabled, echoSuppressionTailMs: echoTailMs)
             }
 
         case AudioWorkerCommand.stopCapture:
@@ -143,8 +157,12 @@ final class AudioRuntime: @unchecked Sendable {
 
     // MARK: - Capture lifecycle (main thread)
 
-    private func startCapture(discordPid: Int32?, requestId: String?, locale: String, onDeviceRecognition: Bool) {
+    private func startCapture(discordPid: Int32?, requestId: String?, locale: String, onDeviceRecognition: Bool, echoSuppression: Bool, echoSuppressionTailMs: Int) {
         stopCapture() // clean slate
+
+        echoSuppressionEnabled = echoSuppression
+        echoTailSeconds = Double(echoSuppressionTailMs) / 1000.0
+        lastDiscordAudioTime = -.infinity
 
         recognizer = SFSpeechRecognizer(locale: Locale(identifier: locale))
         recognizer?.defaultTaskHint = .dictation
@@ -235,7 +253,14 @@ final class AudioRuntime: @unchecked Sendable {
         self.discordRequest = req
 
         let format = inputNode.outputFormat(forBus: 0)
-        inputNode.installTap(onBus: 0, bufferSize: 4096, format: format) { [weak req] buffer, _ in
+        inputNode.installTap(onBus: 0, bufferSize: 4096, format: format) { [weak self, weak req] buffer, _ in
+            // Отмечаем время последнего активного Discord-аудио для echo suppression.
+            if self?.echoSuppressionEnabled == true {
+                let rms = Self.bufferRMS(buffer)
+                if rms > self?.echoRmsThreshold ?? 0.005 {
+                    self?.lastDiscordAudioTime = ProcessInfo.processInfo.systemUptime
+                }
+            }
             req?.append(buffer)
         }
 
@@ -303,7 +328,13 @@ final class AudioRuntime: @unchecked Sendable {
         req.requiresOnDeviceRecognition = onDeviceRecognition
         self.micRequest = req
 
-        inputNode.installTap(onBus: 0, bufferSize: 4096, format: format) { [weak req] buffer, _ in
+        inputNode.installTap(onBus: 0, bufferSize: 4096, format: format) { [weak self, weak req] buffer, _ in
+            // Echo suppression gate: пропускаем буфер только если Discord
+            // молчал дольше echoTailSeconds.
+            if let s = self, s.echoSuppressionEnabled {
+                let sinceDiscord = ProcessInfo.processInfo.systemUptime - s.lastDiscordAudioTime
+                if sinceDiscord < s.echoTailSeconds { return }
+            }
             req?.append(buffer)
         }
 
@@ -330,6 +361,16 @@ final class AudioRuntime: @unchecked Sendable {
         }
 
         self.micEngine = micEngine
+    }
+
+    // MARK: - Echo suppression helpers
+
+    /// RMS амплитуды первого канала буфера. Вызывается из audio render thread.
+    private static func bufferRMS(_ buffer: AVAudioPCMBuffer) -> Float {
+        guard let data = buffer.floatChannelData, buffer.frameLength > 0 else { return 0 }
+        var rms: Float = 0
+        vDSP_rmsqv(data[0], 1, &rms, vDSP_Length(buffer.frameLength))
+        return rms
     }
 
     // MARK: - CATapDescription + aggregate device
