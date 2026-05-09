@@ -1,72 +1,73 @@
-# Design — Meeting transcription (Discord + микрофон)
+# Design — Meeting Transcription (Discord + Microphone)
 
-* **Статус:** Draft / sketch. Не принято, не реализовано.
-* **Дата:** 2026-05-09
-* **Связано с:** ADR 0008 (subprocess isolation), ADR 0011 (validation gate),
-  ADR 0009 (kvBits — переиспользуем тот же IPC паттерн для Audio worker'а).
-* **Ключевой prior art:**
+* **Status:** Draft / sketch. Not adopted, not implemented.
+* **Date:** 2026-05-09
+* **Related:** ADR 0008 (subprocess isolation), ADR 0011 (validation gate),
+  ADR 0009 (kvBits — reusing the same IPC pattern for the Audio worker).
+* **Key prior art:**
   [`froggychips/interview-assistant`](https://github.com/froggychips/interview-assistant) —
-  собственный «нерабочий, но концептуальный» прототип user'а. Содержит
-  **production-grade audio capture pipeline и WhisperMLX-стек**, которые
-  при переносе в Froggy дадут готовый skeleton, а не зелёное поле. См. отдельную
-  секцию [«Reuse from interview-assistant»](#reuse-from-interview-assistant)
-  ниже — она перевешивает многие пункты этого документа.
+  the author's own "non-functional but conceptual" prototype. It contains a
+  **production-grade audio capture pipeline and a WhisperMLX stack** that, when
+  ported into Froggy, will provide a ready-made skeleton rather than a green field.
+  See the separate section [«Reuse from interview-assistant»](#reuse-from-interview-assistant)
+  below — it outweighs many other points in this document.
 
-## Контекст и мотивация
+## Context and motivation
 
-Текущий Froggy решает узкую задачу — заморозка процессов под memory pressure.
-Это работает, но в боевом дне user'а **не закрывает ни одной живой задачи**.
-Нужен минимальный прикладной toolset поверх той же машины, который
-использует уже подключённые ресурсы (mlx-swift LLM, MCP-каналы, Apple Silicon).
+The current Froggy solves a narrow problem — freezing processes under memory
+pressure. It works, but it **doesn't address a single live task** in the
+author's actual workday. What's needed is a minimal applied toolset on top of
+the same machine, using already-connected resources (mlx-swift LLM, MCP
+channels, Apple Silicon).
 
-Первый прикладной use case:
+First applied use case:
 
-> На Discord-созвонах задачи раздают голосом, потом дублируют в Jira текстом.
-> Хочется чтобы Froggy сам слушал созвон, отделял **«я»** от **«Discord»**
-> и выдавал пригодный для Jira текст.
+> During Discord calls, tasks are handed out verbally and then duplicated into
+> Jira as text. The goal is for Froggy to listen to the call, separate **"me"**
+> from **"Discord"**, and produce text that's ready for Jira.
 
-## Scope MVP
+## MVP scope
 
-* Capture двух аудио-потоков:
-  * **mic** — собственный микрофон,
-  * **discord** — output Discord-приложения как **один** поток (без
-    разделения участников внутри).
-* Транскрипция **гибридная:**
-  * realtime preview во время созвона (быстрая модель, latency ≤5 с),
-  * batch финал после окончания (`large-v3` или эквивалент).
-* Output **тройной**:
-  1. Markdown-файл с двумя дорожками + timestamps на диск.
-  2. LLM-summary через **уже существующий** `FroggyMLXWorker`
-     (action items, обещания, дедлайны).
-  3. Авто-черновик в Jira через
+* Capture two audio streams:
+  * **mic** — the local microphone,
+  * **discord** — Discord's application output as a **single** stream (no
+    per-participant separation within the call).
+* **Hybrid transcription:**
+  * realtime preview during the call (fast model, latency ≤ 5 s),
+  * batch finalization after the call ends (`large-v3` or equivalent).
+* **Triple output:**
+  1. Markdown file with two tracks + timestamps written to disk.
+  2. LLM summary via the **existing** `FroggyMLXWorker`
+     (action items, commitments, deadlines).
+  3. Auto-draft in Jira via the
      [`claude.ai_Atlassian` MCP](https://github.com/cloudflare/mcp-server-atlassian)
-     (или `mcp__claude_ai_Atlassian__addCommentToJiraIssue` /
+     (`mcp__claude_ai_Atlassian__addCommentToJiraIssue` /
      `mcp__claude_ai_Atlassian__createJiraIssue`).
 
-## Non-goals MVP
+## MVP non-goals
 
-* **Acoustic diarization участников Discord.** Разделить «я vs они» — да;
-  «коллега-А vs коллега-Б внутри Discord» — нет. Pyannote-стек добавляет
-  100–200 MB модели и реальную точность 70–85 %; для первой итерации
-  не окупается. Если потом окажется critical — добавим как
-  отдельный модуль (см. roadmap).
-* **Discord bot / Discord API.** Чистые per-user voice streams через
-  bot-API — это другой stack (server-side права, OAuth, persistent bot
-  instance). MVP остаётся local-only.
-* **Параллельные созвоны.** Один listener в момент времени.
+* **Acoustic diarization of Discord participants.** Separating "me vs them" —
+  yes; "colleague A vs colleague B within Discord" — no. The pyannote stack adds
+  100–200 MB of model weight with real-world accuracy of 70–85 %; not worth it
+  for the first iteration. If it turns out to be critical later, it can be added
+  as a separate module (see roadmap).
+* **Discord bot / Discord API.** Clean per-user voice streams via the bot API are
+  a different stack (server-side permissions, OAuth, persistent bot instance). The
+  MVP stays local-only.
+* **Concurrent calls.** One listener active at a time.
 
-## Архитектура
+## Architecture
 
 ```
 FroggyDaemon
-├── MLXSupervisor → FroggyMLXWorker          (LLM, текущий)
-├── VortexCoordinator                        (freeze, текущий)
+├── MLXSupervisor → FroggyMLXWorker          (LLM, existing)
+├── VortexCoordinator                        (freeze, existing)
 └── AudioListener (NEW)
     ├── CaptureCoordinator
     │   ├── mic stream    (AVAudioEngine)
     │   └── discord stream (SCK / Core Audio Tap)
     ├── TranscriberSupervisor
-    │   └── FroggyAudioWorker (subprocess)   ← по тому же паттерну, что MLX
+    │   └── FroggyAudioWorker (subprocess)   ← same pattern as MLX
     │       ├── WhisperKit instance: small/base (preview)
     │       └── WhisperKit instance: large-v3   (finalize)
     ├── SessionStore (transcripts to disk)
@@ -75,83 +76,85 @@ FroggyDaemon
         └── → Atlassian MCP (Jira draft)
 ```
 
-**Почему worker subprocess.** Тот же аргумент что в
+**Why a worker subprocess.** The same argument as in
 [ADR 0008 — MLX subprocess isolation](../adr/0008-mlx-subprocess-isolation.md):
-WhisperKit грузит Core ML модель в unified memory. Когда созвон
-закончился, модель надо суметь выгрузить полностью, не «приблизительно».
-`FroggyAudioWorker` подчиняется тому же протоколу IPC что
-`FroggyMLXWorker` — load / unload / kill — и `unloadModel` гарантирует
-возврат памяти ядру через subprocess termination.
+WhisperKit loads a Core ML model into unified memory. When a call ends, the model
+must be fully unloaded — not "approximately." `FroggyAudioWorker` follows the same
+IPC protocol as `FroggyMLXWorker` — load / unload / kill — and `unloadModel`
+guarantees memory is returned to the kernel via subprocess termination.
 
-**Почему capture в `Daemon`, а transcribe в `Worker`.** Capture тонкий —
-Core Audio + SCK API, минимальная RAM, лонг-living поток. Transcribe
-тяжёлый — ML inference. Рассечение по «легковесное держит state, тяжёлое
-живёт в killable subprocess» — повторяем уже работающий паттерн.
+**Why capture in the Daemon but transcription in the Worker.** Capture is
+lightweight — Core Audio + SCK API, minimal RAM, a long-lived stream. Transcription
+is heavy — ML inference. Splitting along "lightweight holds state, heavy lives in a
+killable subprocess" repeats the already-working pattern.
 
 ## Stack choices
 
 ### Audio capture
 
-| Версия macOS | API | Заметки |
+| macOS version | API | Notes |
 |---|---|---|
-| 14.4+ | [Core Audio Tap (`CATapDescription`)](https://developer.apple.com/documentation/coreaudio/catapdescription) | Tap по `pid`/`bundleID`. Чистый, нативный, без virtual device. Требует Screen Recording permission (так Apple). |
-| 13.0–14.3 | [`ScreenCaptureKit` audio](https://developer.apple.com/documentation/screencapturekit) с `SCContentFilter(.application:)` | Apple-recommended до Tap API. Тот же permission. |
-| < 13 | (BlackHole / Loopback) | Не поддерживаем. Platform у Froggy — `.macOS(.v14)`, Tap уже актуален. |
+| 14.4+ | [Core Audio Tap (`CATapDescription`)](https://developer.apple.com/documentation/coreaudio/catapdescription) | Tap by `pid`/`bundleID`. Clean, native, no virtual device. Requires Screen Recording permission (Apple's design). |
+| 13.0–14.3 | [`ScreenCaptureKit` audio](https://developer.apple.com/documentation/screencapturekit) with `SCContentFilter(.application:)` | Apple-recommended before the Tap API. Same permission. |
+| < 13 | (BlackHole / Loopback) | Not supported. Froggy targets `.macOS(.v14)`, so Tap is already applicable. |
 
-Микрофон — обычный AVAudioEngine, никаких особенностей.
+Microphone capture uses standard AVAudioEngine — nothing special.
 
-**Решение:** на старте — SCK как baseline (работает на всём 14+). Если
-смогу подписаться корректно с Tap-entitlements — добавлю Tap fast-path.
+**Decision:** start with SCK as the baseline (works on all 14+). If
+Tap entitlements can be subscribed to cleanly, add the Tap fast-path.
 
-### Транскрипция — WhisperMLX (не WhisperKit)
+### Transcription — WhisperMLX (not WhisperKit)
 
-**Решение пересмотрено** после нахождения interview-assistant. Там user
-уже использует **WhisperMLX** (Whisper через mlx-swift), а не WhisperKit.
-Файлы [`WhisperMLX.swift` (57KB)](https://github.com/froggychips/interview-assistant/blob/main/WhisperMLX.swift),
+**Decision revised** after discovering interview-assistant. The author already uses
+**WhisperMLX** (Whisper via mlx-swift) there, not WhisperKit. Relevant files:
+[`WhisperMLX.swift` (57 KB)](https://github.com/froggychips/interview-assistant/blob/main/WhisperMLX.swift),
 [`WhisperMLXProvider.swift`](https://github.com/froggychips/interview-assistant/blob/main/WhisperMLXProvider.swift),
 [`WhisperProvider.swift`](https://github.com/froggychips/interview-assistant/blob/main/WhisperProvider.swift).
 
-Аргументы за WhisperMLX:
+Arguments for WhisperMLX:
 
-1. **Одна ML-инфра.** У Froggy уже зависимость на `mlx-swift-lm` и `mlx-swift`
-   через `FroggyMLXWorker`. WhisperMLX живёт в той же экосистеме —
-   одна доменная модель Metal-shader'ов, один ADR 0013-style metallib pipeline,
-   одна точка обновления версий.
-2. **Прецедент в interview-assistant.** Код уже написан и работал у user'а
-   на той же машине. WhisperKit пришлось бы заново тестировать на
-   permissions / Core ML compile / model fetch.
-3. **GPU arbitration.** interview-assistant имеет `GPUResourceManager` +
-   «GPU lock arbitration (Whisper vs Qwen)» в `ConversationOrchestrator`.
-   Если бы мы взяли WhisperKit — два разных GPU-lifecycle'а под одним
-   unified memory, конкуренция труднее контролируется.
+1. **Single ML infrastructure.** Froggy already depends on `mlx-swift-lm` and
+   `mlx-swift` via `FroggyMLXWorker`. WhisperMLX lives in the same ecosystem —
+   one Metal shader domain model, one ADR 0013-style metallib pipeline, one
+   version-update touchpoint.
+2. **Precedent in interview-assistant.** The code is already written and ran on
+   the same machine. WhisperKit would need fresh testing for permissions / Core ML
+   compilation / model fetching.
+3. **GPU arbitration.** interview-assistant includes `GPUResourceManager` and
+   "GPU lock arbitration (Whisper vs Qwen)" in `ConversationOrchestrator`.
+   Using WhisperKit would mean two different GPU lifecycles under one unified
+   memory pool — contention is harder to control.
 
-Альтернативы (рассмотрены, отброшены):
+Alternatives considered and rejected:
 
-* **WhisperKit** — Apple Core ML stack, отдельный от mlx-swift. Хорош для
-  greenfield-проекта (Klee бы взял), но у нас уже есть MLX-инвестиция.
-* **whisper.cpp** — рабочая, но C++ wrapping'ом усложняет Swift 6 strict
+* **WhisperKit** — Apple's Core ML stack, separate from mlx-swift. A fine choice
+  for a greenfield project (Klee would use it), but we already have an MLX
+  investment.
+* **whisper.cpp** — functional, but C++ wrapping complicates the Swift 6 strict
   concurrency story.
-* **Apple Speech (`SFSpeechRecognizer`)** — Apple-native, но cloud-fallback
-  на старых моделях, и качество русского — заметно хуже Whisper.
+* **Apple Speech (`SFSpeechRecognizer`)** — Apple-native, but with cloud fallback
+  on older models, and Russian quality is noticeably worse than Whisper.
 
 ### LLM summary
 
-`FroggyMLXWorker` уже есть и грузит mlx-swift LLM. Дополнительной
-зависимости не нужно — отправляем транскрипт через тот же IPC-канал
-с системным промптом «выдели action items / обещания / дедлайны».
+`FroggyMLXWorker` already exists and loads an mlx-swift LLM. No additional
+dependency is needed — send the transcript over the same IPC channel with a system
+prompt of "extract action items / commitments / deadlines."
 
-Промпт — отдельный файл `Sources/.../prompts/meeting-summary.txt`,
-версионируемый (поправил промпт → отвалился bench → откат).
+The prompt lives in a dedicated versioned file
+`Sources/.../prompts/meeting-summary.txt` (edit the prompt → bench breaks → roll
+back).
 
 ### Jira draft
 
-Через
-[`claude.ai_Atlassian` MCP](https://docs.atlassian.com/) — у user'а
-подключен, виден в текущей сессии (`mcp__claude_ai_Atlassian__*` инструменты).
+Via the
+[`claude.ai_Atlassian` MCP](https://docs.atlassian.com/) — connected in the
+author's environment, visible in the current session (`mcp__claude_ai_Atlassian__*`
+tools).
 
-* `createJiraIssue` — если из созвона вышло «новое таска».
-* `addCommentToJiraIssue` — если был upd по существующему таску
-  (mapping встречи → issue нужен — см. open issues).
+* `createJiraIssue` — when the call produces a new task.
+* `addCommentToJiraIssue` — when there's an update to an existing issue
+  (call → issue mapping required; see open issues).
 
 ## Data flow
 
@@ -165,7 +168,7 @@ Core Audio + SCK API, минимальная RAM, лонг-living поток. Tr
              │                        │
              └─────────┬──────────────┘
                        ▼
-        SessionStore (на диск, append-only WAV или Opus)
+        SessionStore (to disk, append-only WAV or Opus)
                        │
                        ├──── ring buffer 30s
                        │       │
@@ -184,15 +187,14 @@ Core Audio + SCK API, минимальная RAM, лонг-living поток. Tr
                        └── Atlassian MCP → Jira draft (issue / comment)
 ```
 
-**Обоснование двойной транскрипции (preview + finalize).** Realtime
-с `large-v3` на M3 не вытянет real-time factor с приемлемой latency;
-`base` вытянет, но точность хуже (особенно для русско-английского
-code-switching). Финальный пересбор `large` поверх записанного
-WAV-файла после звонка — компенсация.
+**Rationale for dual transcription (preview + finalize).** Running `large-v3`
+in real time on an M3 won't achieve an acceptable real-time factor; `base` will,
+but accuracy suffers — especially for Russian-English code-switching. A final pass
+with `large` over the recorded WAV after the call compensates for this.
 
 ## Permissions story
 
-Точный набор entitlements **известен** —
+The exact set of entitlements is **known** — from
 [`InterviewAssistant.entitlements`](https://github.com/froggychips/interview-assistant/blob/main/InterviewAssistant.entitlements):
 
 ```xml
@@ -202,198 +204,196 @@ WAV-файла после звонка — компенсация.
 <key>com.apple.security.screen-capture</key><true/>
 ```
 
-Применимо к Froggy as-is:
+Applicable to Froggy as-is:
 
-* **`screen-capture`** — для SCK audio Discord'а. Apple соединил audio-only
-  capture со Screen Recording, поэтому permission запрашивается странный
-  для пользователя. В UI надо объяснить.
-* **`speech-recognition`** — нужен только если используем Apple Speech как
-  fallback. Если только WhisperMLX → можно НЕ запрашивать.
-* **`network.client`** — для Atlassian MCP / HF model download.
-* **`files.user-selected.read-write`** — для save-as маркдаун-транскриптов.
-* **Microphone** — отдельно через `NSMicrophoneUsageDescription` в Info.plist
-  (это не entitlement). TCC-prompt на первом запуске.
-* **(опц.) Core Audio Tap** — на macOS 14.4+ `CATapDescription` идёт
-  под `screen-capture` тем же entitlement'ом, новый отдельный не нужен.
+* **`screen-capture`** — for SCK audio from Discord. Apple ties audio-only capture
+  to Screen Recording, which makes the permission request feel odd to the user.
+  This needs to be explained in the UI.
+* **`speech-recognition`** — only needed if Apple Speech is used as a fallback.
+  If WhisperMLX only → this can be omitted.
+* **`network.client`** — for the Atlassian MCP / HuggingFace model downloads.
+* **`files.user-selected.read-write`** — for save-as of markdown transcripts.
+* **Microphone** — separately via `NSMicrophoneUsageDescription` in Info.plist
+  (this is not an entitlement). TCC prompt on first launch.
+* **(optional) Core Audio Tap** — on macOS 14.4+, `CATapDescription` runs under
+  the same `screen-capture` entitlement; no new separate one is needed.
 
-Code signing config в проекте сейчас — debug. Production-сборка с
-этими entitlements потребует actual developer cert
-(см. [ADR 0012 — signing constraints honest doc](../adr/0012-signing-constraints-honest-doc.md)).
+The project's current code signing configuration is debug. A production build
+with these entitlements will require an actual developer certificate
+(see [ADR 0012 — signing constraints honest doc](../adr/0012-signing-constraints-honest-doc.md)).
 
-## Open issues / решить до Phase 1
+## Open issues / resolve before Phase 1
 
-1. **Trigger.** Что включает listener?
+1. **Trigger.** What activates the listener?
    * Hotkey (toggle on/off).
-   * Auto-detect Discord в frontmost / running apps + voice activity.
+   * Auto-detect Discord in frontmost / running apps + voice activity.
    * Menubar action.
    * CLI: `froggy listen --duration 1h`.
-2. **Mapping звонок → Jira issue.** Откуда берём ID issue для comment'а?
-   * Calendar invite (Google Calendar MCP уже есть в окружении —
-     вытащить description / Jira link).
-   * Manual: hotkey `cmd+J` → дёргается inline-prompt «Jira ID?».
-   * LLM-derived: summary содержит явный referenсе.
-3. **Privacy.** Транскрипты содержат всё что говорят коллеги.
-   * Хранить локально, не синкать (CloudDrive отключить для каталога).
-   * Опция «redact PII через LushaBridge `Redactor` перед summary».
-4. **Storage budget.** Часовой созвон в Opus ≈ 30 MB, в WAV — 230 MB.
-   Через месяц активного использования — до 30 GB. Нужен retention
-   policy: «храним N дней» / «храним только summary, raw чистим».
-5. **Confidentiality модели.** WhisperKit — local. LLM — local
-   (`FroggyMLXWorker`). Jira MCP — это **внешний service call** через
-   Atlassian. Содержимое summary улетает на их сервер. Если на
-   созвонах есть NDA-контент — это надо явно сказать пользователю.
+2. **Call → Jira issue mapping.** Where does the issue ID for a comment come from?
+   * Calendar invite (Google Calendar MCP is already in the environment —
+     pull the description / Jira link from it).
+   * Manual: hotkey `cmd+J` → triggers an inline prompt "Jira ID?".
+   * LLM-derived: the summary contains an explicit reference.
+3. **Privacy.** Transcripts contain everything colleagues say.
+   * Store locally, no sync (disable CloudDrive for the directory).
+   * Option to "redact PII via LushaBridge `Redactor` before summary."
+4. **Storage budget.** A one-hour call in Opus ≈ 30 MB; in WAV — 230 MB.
+   After a month of active use — up to 30 GB. A retention policy is needed:
+   "keep N days" / "keep only summary, delete raw."
+5. **Model confidentiality.** WhisperKit — local. LLM — local
+   (`FroggyMLXWorker`). Jira MCP — this is an **external service call** through
+   Atlassian. Summary content is sent to their server. If calls contain NDA
+   content, the user must be explicitly informed.
 
-## Roadmap (фазами)
+## Roadmap (phased)
 
-### Phase 0 — verify feasibility (без правки `Sources/`)
+### Phase 0 — verify feasibility (no changes to `Sources/`)
 
-* Спайк не нужен из-за наличия [interview-assistant prior art](#reuse-from-interview-assistant) —
-  user уже подтвердил feasibility на M-серии silicon'е. Заменяется на:
-* **Audit-pass по interview-assistant**: прочитать `AudioService.swift`,
-  `WhisperMLX.swift`, `ConversationOrchestrator.swift` целиком, выписать
-  что переносим и что нет. Эта заметка ↓ — первый проход; нужен
-  второй с конкретными line-references после снятия freeze'а.
-* **Verify build status interview-assistant.** User сказал «нерабочий».
-  Понять что именно не работает: build fail / runtime crash / privacy
-  prompt не выдаётся / Whisper медленный. Без этого риск унаследовать
-  ту же проблему.
+* A spike is unnecessary given the [interview-assistant prior art](#reuse-from-interview-assistant) —
+  feasibility on M-series silicon was already confirmed by the author. Replaced by:
+* **Audit pass of interview-assistant**: read `AudioService.swift`,
+  `WhisperMLX.swift`, `ConversationOrchestrator.swift` in full; list what we're
+  porting and what we're not. This note is a first pass; a second pass with
+  specific line references is needed after the code freeze is lifted.
+* **Verify interview-assistant build status.** The author said it "doesn't work."
+  Understand exactly what's broken: build failure / runtime crash / TCC prompt not
+  appearing / Whisper too slow. Without this, we risk inheriting the same blocker.
 
-### Phase 1 — capture + batch transcription (после снятия freeze'а)
+### Phase 1 — capture + batch transcription (after freeze is lifted)
 
-* `AudioListener` actor в `VortexCore` (или новый module
-  `LushaListener` рядом с `LushaBridge`).
-* `FroggyAudioWorker` subprocess с одной WhisperKit-инстанцией.
-* CLI-команда `froggy listen` → пишет на диск + транскрипт после.
-* Markdown-файл на выходе. Пока без Jira / summary.
+* `AudioListener` actor in `VortexCore` (or a new module `LushaListener`
+  alongside `LushaBridge`).
+* `FroggyAudioWorker` subprocess with a single WhisperKit instance.
+* CLI command `froggy listen` → writes to disk + transcript afterward.
+* Markdown output. No Jira / summary yet.
 
 ### Phase 2 — preview + summary
 
-* Вторая WhisperKit-инстанция в worker'е для realtime preview.
-* Интеграция с `FroggyMLXWorker` для summary.
-* Menubar item с current state.
+* Second WhisperKit instance in the worker for realtime preview.
+* Integration with `FroggyMLXWorker` for summary.
+* Menubar item showing current state.
 
 ### Phase 3 — Jira integration
 
-* Atlassian MCP вызов из Daemon (или из CLI скрипта).
-* Mapping calendar → Jira (см. open issue 2).
+* Atlassian MCP call from the daemon (or from a CLI script).
+* Calendar → Jira mapping (see open issue 2).
 
-### Phase 4 (опц.) — diarization
+### Phase 4 (optional) — diarization
 
-* pyannote или альтернативный local-diarization.
-* Только если Phase 1–3 показали что без этого useful, и user
-  сказал что хочет.
+* pyannote or an alternative local diarization solution.
+* Only if Phases 1–3 show that it's useful without this, and the author
+  asks for it.
 
-## Что точно не делаем
+## Hard constraints
 
-* Не качаем за пользователем модель в момент первой записи. Pre-cache
-  в `~/.froggy/whisper-models/<id>/` через menubar `Download model`.
-* Не запускаем listener автоматически без подтверждения пользователя.
-  Privacy-боль слишком большая.
-* Не делаем cloud upload audio. Никогда. Локально или никак.
-* Не лезем в Discord process internals (memory inspection / pipe
-  hooking). Только публичные macOS API.
+* Do not download models on the user's behalf at first-record time. Pre-cache in
+  `~/.froggy/whisper-models/<id>/` via a menubar "Download model" action.
+* Do not start the listener automatically without user confirmation.
+  The privacy cost is too high.
+* Never upload audio to the cloud. Ever. Local or nothing.
+* Do not touch Discord process internals (memory inspection / pipe hooking).
+  Public macOS APIs only.
 
 ---
 
 ## Reuse from interview-assistant
 
-[`froggychips/interview-assistant`](https://github.com/froggychips/interview-assistant) —
-SwiftUI app для live технических интервью, написанный user'ом как
-концептуальный прототип. Помечен как «нерабочий», но содержит
-полностью продуманную audio + transcription + LLM pipeline,
-которая на 70-80% переиспользуема для Froggy meeting transcription.
+[`froggychips/interview-assistant`](https://github.com/froggychips/interview-assistant)
+is a SwiftUI app for live technical interviews, written by the author as a
+conceptual prototype. It's marked as "non-functional," but contains a fully
+thought-out audio + transcription + LLM pipeline that is 70–80% reusable for
+Froggy meeting transcription.
 
-**Ключевая выгода:** мы не строим audio capture с нуля. Берём
-готовые компоненты, выкидываем то что специфично для interview
-use case (overlay-okno подсказок, OCR кода-на-экране, intent detection
-для interview-вопросов) — остаётся базовый pipeline, идеально
-подходящий под наш use case.
+**The key benefit:** we don't build audio capture from scratch. We take the
+ready-made components, discard what's specific to the interview use case
+(overlay hint window, on-screen code OCR, intent detection for interview
+questions), and what remains is a base pipeline that fits our use case perfectly.
 
-### Что переносится почти as-is
+### What ports nearly as-is
 
-| Файл из interview-assistant | Размер | Зачем нам |
+| File from interview-assistant | Size | Why we need it |
 |---|---|---|
-| [`AudioService.swift`](https://github.com/froggychips/interview-assistant/blob/main/AudioService.swift) | 97 KB | **Главный приз.** Три стратегии capture: `processTap(pid:)` (Core Audio Tap), `loopback(deviceName:)` (BlackHole + aggregate), `microphoneOnly`/`appPreferredInput`. Watchdog для engine stall, fallback chains, signal telemetry, channel auto-detection. Production-grade. |
-| [`WhisperMLX.swift`](https://github.com/froggychips/interview-assistant/blob/main/WhisperMLX.swift) | 57 KB | MLX-based Whisper inference — наш STT engine. |
-| [`WhisperMLXProvider.swift`](https://github.com/froggychips/interview-assistant/blob/main/WhisperMLXProvider.swift) | ~6 KB | Provider abstraction — позволяет менять backend без переписывания caller'ов. |
-| [`VAD.swift`](https://github.com/froggychips/interview-assistant/blob/main/VAD.swift) + [`VADTests.swift`](https://github.com/froggychips/interview-assistant/blob/main/InterviewAssistantTests/VADTests.swift) | 4 KB + 9 KB | Voice activity detection — нужен чтобы не транскрибировать тишину. С тестами. |
-| [`SpeechNormalizer.swift`](https://github.com/froggychips/interview-assistant/blob/main/SpeechNormalizer.swift) | 6 KB | Постобработка распознанного текста (фактически — нормализация чисел, аббревиатур, etc.). С тестами. |
-| [`SpeechDetectionService.swift`](https://github.com/froggychips/interview-assistant/blob/main/SpeechDetectionService.swift) | 14 KB | Service layer для VAD-based event detection. |
-| [`MemoryAwareRouter.swift`](https://github.com/froggychips/interview-assistant/blob/main/MemoryAwareRouter.swift) + [`MemoryManagement.swift`](https://github.com/froggychips/interview-assistant/blob/main/MemoryManagement.swift) | 9 KB + 12 KB | **Особо ценно:** routing решений под memory pressure. Естественно интегрируется с Froggy `MemoryPressureMonitor` — фактически тот же mental model. |
-| [`GPUResourceManager.swift`](https://github.com/froggychips/interview-assistant/blob/main/GPUResourceManager.swift) | 6 KB | **GPU lock arbitration Whisper vs LLM.** Критично, если в Froggy одновременно работают `FroggyMLXWorker` (Qwen) и WhisperMLX — конкуренция за unified memory / Metal queues. |
-| [`KeychainSecretStore.swift`](https://github.com/froggychips/interview-assistant/blob/main/KeychainSecretStore.swift) | 2.5 KB | Хранение API-ключей (Atlassian token и т.п.) в Keychain. |
-| [`InterviewAssistant.entitlements`](https://github.com/froggychips/interview-assistant/blob/main/InterviewAssistant.entitlements) | 435 B | См. секцию [Permissions story](#permissions-story). |
-| [`StructuredLogging.swift`](https://github.com/froggychips/interview-assistant/blob/main/StructuredLogging.swift) | 14 KB | Structured os.Logger обёртки. У Froggy уже есть `os.Logger` поверх unified log — можно стянуть только если у interview-assistant полезные patterns; иначе пропустить. |
-| [`EventBuffer.swift`](https://github.com/froggychips/interview-assistant/blob/main/EventBuffer.swift) | 8 KB | Ring buffer для событий — концептуально близок Froggy `ContextStore`. |
+| [`AudioService.swift`](https://github.com/froggychips/interview-assistant/blob/main/AudioService.swift) | 97 KB | **The main prize.** Three capture strategies: `processTap(pid:)` (Core Audio Tap), `loopback(deviceName:)` (BlackHole + aggregate), `microphoneOnly`/`appPreferredInput`. Engine stall watchdog, fallback chains, signal telemetry, channel auto-detection. Production-grade. |
+| [`WhisperMLX.swift`](https://github.com/froggychips/interview-assistant/blob/main/WhisperMLX.swift) | 57 KB | MLX-based Whisper inference — our STT engine. |
+| [`WhisperMLXProvider.swift`](https://github.com/froggychips/interview-assistant/blob/main/WhisperMLXProvider.swift) | ~6 KB | Provider abstraction — allows swapping the backend without rewriting callers. |
+| [`VAD.swift`](https://github.com/froggychips/interview-assistant/blob/main/VAD.swift) + [`VADTests.swift`](https://github.com/froggychips/interview-assistant/blob/main/InterviewAssistantTests/VADTests.swift) | 4 KB + 9 KB | Voice activity detection — needed to avoid transcribing silence. Comes with tests. |
+| [`SpeechNormalizer.swift`](https://github.com/froggychips/interview-assistant/blob/main/SpeechNormalizer.swift) | 6 KB | Post-processing of recognized text (number normalization, abbreviations, etc.). Comes with tests. |
+| [`SpeechDetectionService.swift`](https://github.com/froggychips/interview-assistant/blob/main/SpeechDetectionService.swift) | 14 KB | Service layer for VAD-based event detection. |
+| [`MemoryAwareRouter.swift`](https://github.com/froggychips/interview-assistant/blob/main/MemoryAwareRouter.swift) + [`MemoryManagement.swift`](https://github.com/froggychips/interview-assistant/blob/main/MemoryManagement.swift) | 9 KB + 12 KB | **Especially valuable:** routing decisions under memory pressure. Integrates naturally with Froggy's `MemoryPressureMonitor` — effectively the same mental model. |
+| [`GPUResourceManager.swift`](https://github.com/froggychips/interview-assistant/blob/main/GPUResourceManager.swift) | 6 KB | **GPU lock arbitration between Whisper and LLM.** Critical if `FroggyMLXWorker` (Qwen) and WhisperMLX run simultaneously in Froggy — contention over unified memory / Metal queues. |
+| [`KeychainSecretStore.swift`](https://github.com/froggychips/interview-assistant/blob/main/KeychainSecretStore.swift) | 2.5 KB | Storing API keys (Atlassian token etc.) in the Keychain. |
+| [`InterviewAssistant.entitlements`](https://github.com/froggychips/interview-assistant/blob/main/InterviewAssistant.entitlements) | 435 B | See the [Permissions story](#permissions-story) section. |
+| [`StructuredLogging.swift`](https://github.com/froggychips/interview-assistant/blob/main/StructuredLogging.swift) | 14 KB | Structured os.Logger wrappers. Froggy already has `os.Logger` over unified log — pull this only if interview-assistant has useful patterns; otherwise skip. |
+| [`EventBuffer.swift`](https://github.com/froggychips/interview-assistant/blob/main/EventBuffer.swift) | 8 KB | Ring buffer for events — conceptually close to Froggy's `ContextStore`. |
 
-### Что переносится со значительной адаптацией
+### What ports with significant adaptation
 
-| Файл | Зачем адаптация |
+| File | Why adaptation is needed |
 |---|---|
-| [`TranscriptionService.swift`](https://github.com/froggychips/interview-assistant/blob/main/TranscriptionService.swift) (32 KB) | Логика двух потоков и orchestration; в Froggy надо переписать под dual-stream (mic + Discord), а в interview-assistant у user'а structure для interview-pair (interviewer/candidate). |
-| [`ConversationOrchestrator.swift`](https://github.com/froggychips/interview-assistant/blob/main/ConversationOrchestrator.swift) (21 KB) + tests | Turn tracking, GPU lock arbitration, echo confidence — концепции переносятся, но trigger logic в interview-assistant заточен под «detected interview question → invoke AI». У нас trigger другой (см. open issue 1 в этом документе). |
-| [`AudioSetupManager.swift`](https://github.com/froggychips/interview-assistant/blob/main/AudioSetupManager.swift) (25 KB) | Onboarding wizard для audio routing. Логика выбора loopback / process tap полезна, UI шаги под наш UX надо переписать. |
-| [`MLXProvider.swift`](https://github.com/froggychips/interview-assistant/blob/main/MLXProvider.swift) (16 KB) | У нас уже свой `FroggyMLXWorker`. Сравнить и взять только то, что у нас отсутствует (например, оптимизации [KLEE-A..F](../peer-research/klee-mlx-optimizations.md), если interview-assistant их применил). |
+| [`TranscriptionService.swift`](https://github.com/froggychips/interview-assistant/blob/main/TranscriptionService.swift) (32 KB) | Dual-stream orchestration logic; Froggy needs this rewritten for dual-stream (mic + Discord), while interview-assistant structures it for an interview pair (interviewer/candidate). |
+| [`ConversationOrchestrator.swift`](https://github.com/froggychips/interview-assistant/blob/main/ConversationOrchestrator.swift) (21 KB) + tests | Turn tracking, GPU lock arbitration, echo confidence — the concepts port over, but the trigger logic in interview-assistant is tailored to "detected interview question → invoke AI." Our trigger is different (see open issue 1 in this document). |
+| [`AudioSetupManager.swift`](https://github.com/froggychips/interview-assistant/blob/main/AudioSetupManager.swift) (25 KB) | Onboarding wizard for audio routing. The loopback / process tap selection logic is useful; the UI steps need to be rewritten for our UX. |
+| [`MLXProvider.swift`](https://github.com/froggychips/interview-assistant/blob/main/MLXProvider.swift) (16 KB) | We already have our own `FroggyMLXWorker`. Compare and take only what we're missing (e.g. [KLEE-A..F optimizations](../peer-research/klee-mlx-optimizations.md) if interview-assistant applied them). |
 
-### Что НЕ переносим (специфика interview use case)
+### What we do NOT port (interview use case specifics)
 
 * `OverlayWindow.swift`, `MainWindowController.swift`, `OnboardingStepViews.swift`,
-  `ContentView.swift` (110 KB), `SettingsView.swift` (148 KB) — UI заточен под
-  interview overlay; у Froggy свой menubar.
-* `ContentClassifier.swift` (OCR класс. кода/configs/logs) — interview-specific.
-  У Froggy уже есть `LushaBridge` для OCR, своё.
+  `ContentView.swift` (110 KB), `SettingsView.swift` (148 KB) — UI built for the
+  interview overlay; Froggy has its own menubar.
+* `ContentClassifier.swift` (OCR classifier for code/configs/logs) — interview-specific.
+  Froggy already has `LushaBridge` for OCR.
 * `CodeGhostWriter.swift`, `Humanizer.swift`, `SystemPromptBuilder.swift`,
   `Prompt.swift` — interview ghost-writer / hint generator.
 * `SimulatorView.swift`, `SimulatorManager.swift`, `BenchmarkManager 2.swift` —
-  interview simulator / dev tool. У нас свой `bench/`.
+  interview simulator / dev tool. We have our own `bench/`.
 * `OnboardingManager.swift`, `OnboardingWizardManager.swift` — interview-flow
   onboarding.
-* `HotkeyManager.swift` — концептуально нам тоже понадобится hotkey, но
-  лучше написать свой чище, чем чистить interview-specific bindings.
+* `HotkeyManager.swift` — we'll need hotkeys too conceptually, but it's cleaner
+  to write our own than to strip out interview-specific bindings.
 
-### Echo detection — обязательная зависимость
+### Echo detection — mandatory dependency
 
-`AudioService.echoDetector` + методы `isEchoLikely()`, `getEchoConfidence()`,
-`updateEchoDetector(with rms:)` решают **критическую** проблему:
+`AudioService.echoDetector` + the methods `isEchoLikely()`, `getEchoConfidence()`,
+`updateEchoDetector(with rms:)` solve a **critical** problem:
 
-> Если user слушает Discord через **спикеры** (а не headphones), его
-> микрофон захватывает Discord output. Без echo detection транскрипт
-> mic-потока будет дублировать Discord-поток с задержкой.
+> If the user listens to Discord through **speakers** (not headphones), the
+> microphone captures Discord's output. Without echo detection, the mic stream
+> transcript will duplicate the Discord stream with a delay.
 
-В interview-assistant — 300 ms acoustic correlation между mic RMS и
-system RMS. Если корреляция выше threshold → mic-buffer считается
-эхом и не уходит в транскрипцию.
+In interview-assistant — 300 ms acoustic correlation between mic RMS and system
+RMS. If the correlation exceeds the threshold → the mic buffer is considered echo
+and is not sent to transcription.
 
-В нашем design doc это было **не упомянуто** — добавить в Phase 1
-обязательным компонентом, не опциональным.
+This was **not mentioned** in the original design doc — it must be added to Phase 1
+as a mandatory component, not optional.
 
-### Вопросы которые остаются после reuse-аудита
+### Questions remaining after the reuse audit
 
-1. **Почему interview-assistant «нерабочий»?** User написал что прототип
-   не работает. Нужно понять конкретно: build fail на актуальной Xcode?
-   Какой-то TCC-prompt не вылазит на macOS 15? WhisperMLX крашит на load?
-   GPU contention под одновременной нагрузкой? Без этого знания мы
-   рискуем унаследовать тот же блокер.
-2. **Какая версия mlx-swift в interview-assistant vs в Froggy?**
-   `Package.resolved` обоих сравнить — если interview-assistant на
-   старой mlx-swift, перенос потребует адаптации API.
-3. **Есть ли в interview-assistant working tests?** Список тестовых
-   файлов (`InterviewAssistantTests/`) внушительный — 12 файлов, ~1000
-   строк. Если они зелёные на main — это сильный сигнал что код
-   не «полностью нерабочий», просто end-to-end интеграция не дошла.
+1. **Why is interview-assistant "non-functional"?** The author wrote that the
+   prototype doesn't work. We need to understand exactly what's broken: build
+   failure on current Xcode? A TCC prompt not appearing on macOS 15? WhisperMLX
+   crashing on load? GPU contention under simultaneous load? Without this
+   knowledge we risk inheriting the same blocker.
+2. **What version of mlx-swift does interview-assistant use vs Froggy?**
+   Compare both `Package.resolved` files — if interview-assistant is on an older
+   mlx-swift, the port will require API adaptation.
+3. **Are there working tests in interview-assistant?** The test file list
+   (`InterviewAssistantTests/`) is substantial — 12 files, ~1,000 lines. If they
+   pass on main, that's a strong signal that the code isn't "completely broken" —
+   just that end-to-end integration was never finished.
 
 ---
 
-## Источники
+## Sources
 
 * **[`froggychips/interview-assistant`](https://github.com/froggychips/interview-assistant)** —
-  собственный prior art user'а. Главный источник готовых компонентов
-  (см. [Reuse from interview-assistant](#reuse-from-interview-assistant)).
+  the author's own prior art. The primary source of ready-made components
+  (see [Reuse from interview-assistant](#reuse-from-interview-assistant)).
 * [Apple — ScreenCaptureKit framework](https://developer.apple.com/documentation/screencapturekit)
 * [Apple — `CATapDescription` (macOS 14.4+)](https://developer.apple.com/documentation/coreaudio/catapdescription)
 * [WWDC24 — Capturing system audio with Core Audio taps](https://developer.apple.com/videos/play/wwdc2024/10145/)
 * [Atlassian Remote MCP server](https://www.atlassian.com/platform/remote-mcp-server)
 * [pyannote-audio — speaker diarization](https://github.com/pyannote/pyannote-audio)
-  (для возможного Phase 4)
+  (for potential Phase 4)
 * [WhisperKit — argmaxinc/WhisperKit](https://github.com/argmaxinc/WhisperKit) —
-  rejected alternative (см. секцию [Транскрипция](#транскрипция--whispermlx-не-whisperkit)).
+  rejected alternative (see [Transcription](#transcription--whispermlx-not-whisperkit) section).
