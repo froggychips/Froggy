@@ -157,6 +157,52 @@ benchmark без живого FroggyDaemon + загруженной модели
 frontmost-приложений. Делается пользователем после merge всех Mem-серии,
 до того как браться за overlay (Mem-5 этап 2) или Уровень 2.
 
+## Trust Governance — следующий шаг после AD-1 + FCP-1 + EXP-1 (не Уровень 2)
+
+После того как AD-1 / FCP-1 / EXP-1 смерджены — **не открывать Уровень 2**
+напрямую. Сначала замкнуть trust governance (Уровень 1.5 продолжение):
+
+### AD-2 — audio + camera freeze signals
+
+Источник: [`docs/design/activity-detection.md`](design/activity-detection.md) § AD-2.
+Самый важный trust-governance gap: Froggy умеет не морозить frontmost-app
+(AD-1), но не знает когда процесс ведёт активный аудио-звонок или видео.
+Failure mode: **заморожен Zoom/Discord mid-call → аудио обрывается → uninstall.**
+THESIS называет это thesis-level failure, не баг.
+
+Что реализовать:
+* `CoreAudio HAL` query: `kAudioDevicePropertyDeviceIsRunning` по pid'у кандидата.
+  Если процесс держит активный I/O stream → confidence 0.9 → не морозить.
+* `CoreMediaIO HAL` query для камеры (аналогично). Confidence 0.95.
+* Интеграция в `VortexCoordinator.freezeTier()`: перед SIGSTOP — запрос
+  ActivityDetector, skip если confidence > threshold.
+* 50 ms timeout на HAL queries (уже описан в design-doc), fallback = 0 (нейтрально).
+* Тесты: `FakeActivityDetector` (по аналогии `FakeMemoryPressureSource`).
+
+ADR обязателен (новый сигнал, расширение threat model). Ref:
+[`docs/design/activity-detection.md`](design/activity-detection.md).
+
+### QW-1 — URL-accessor (Apple Events) (после снятия freeze Sources/**)
+
+Новый `BrowserURLAccessor` в `LushaExperimental`. Apple Events → активная вкладка
+Safari / Chrome / Arc / Brave → URL + title. Entitlement:
+`com.apple.security.automation.apple-events` + `NSAppleEventsUsageDescription`.
+~30 строк accessor + plist-правка. Без этого LLM видит OCR-текст страницы, но
+не знает адрес — разница в качестве генерации значительная для «что за сайт?».
+
+Ref: [`docs/peer-research/competitor-analysis.md`](peer-research/competitor-analysis.md) § QW-1.
+
+### QW-2 — Incognito auto-pause (после снятия freeze Sources/**)
+
+В `VisionActor` перед каждым capture-циклом — Apple Events → `AXIsPrivate`
+активного браузерного окна. Если да → пропустить снапшот, не писать в
+ContextStore. Privacy non-negotiable по THESIS. Тот же entitlement что QW-1 —
+один PR с QW-1.
+
+Ref: [`docs/peer-research/competitor-analysis.md`](peer-research/competitor-analysis.md) § QW-2.
+
+---
+
 ## Уровень 2 — заблокирован до AD-1 + FCP-1 + EXP-1 в main
 
 См. ADR 0011 (он же «ADR-0009» в внешних заметках). Не трогаем design,
@@ -708,3 +754,25 @@ RFC — **между** ними, не вместо них и не блокиру
   `prefillStepSize`/sampler nuances, `ModelConfiguration(directory:)`,
   TokenizerPatcher) + бонус про точные bench-метрики через
   `GenerateCompletionInfo`. Применять после снятия freeze на `Sources/`.
+
+* **Competitor analysis (Memento / Klee / ChatMLX):** см.
+  [`docs/peer-research/competitor-analysis.md`](docs/peer-research/competitor-analysis.md).
+  Где Froggy опережает (memory orchestration, subprocess isolation, redaction,
+  scriptability), где отстаёт (URL-контекст, incognito-пауза), что не делает
+  никто (audio + screen → LLM на 8 GB, tool calling над screen context).
+  Явные non-goals зафиксированы там же: persistent history / SQLite FTS5,
+  signed DMG как user-feature, semantic search — всё это POSITIONING non-goal.
+  **COMPETITOR-KLEE-TOOLCALL** — mlx-swift-lm ToolCall API референс для
+  design Уровня 2 (tool calling).
+
+## Боевой toolset (meeting transcription)
+
+* **Design doc:** [`docs/design/meeting-transcription.md`](docs/design/meeting-transcription.md).
+  Discord audio + микрофон → WhisperMLX (preview малой моделью + finalize
+  large-v3) → markdown + LLM summary через `FroggyMLXWorker` + Jira draft
+  через Atlassian MCP. Hybrid realtime/batch, MVP без diarization.
+* **Prior art (главный):** собственный
+  [`froggychips/interview-assistant`](https://github.com/froggychips/interview-assistant) —
+  готовый production-grade audio capture + WhisperMLX. На 70-80%
+  портируется в Froggy. Перед Phase 1 — выяснить **почему именно
+  прототип не работает**, чтобы не унаследовать блокер.
