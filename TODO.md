@@ -700,3 +700,11 @@ RFC — **между** ними, не вместо них и не блокиру
   (когда выйдет) или установить env flag
   `FORCE_JAVASCRIPT_ACTIONS_TO_NODE24=true` в workflow. Не error —
   просто warning, не блокирует, но к Q3 2026 надо закрыть.
+
+## Peer research — cherry-pick кандидаты
+
+* **MLX-перф из Klee:** см. [`docs/peer-research/klee-mlx-optimizations.md`](docs/peer-research/klee-mlx-optimizations.md).
+  Пять оптимизаций для `FroggyMLXWorker` (Metal warmup, `Memory.cacheLimit`,
+  `prefillStepSize`/sampler nuances, `ModelConfiguration(directory:)`,
+  TokenizerPatcher) + бонус про точные bench-метрики через
+  `GenerateCompletionInfo`. Применять после снятия freeze на `Sources/`.
