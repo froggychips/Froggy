@@ -514,6 +514,22 @@ public actor VortexCoordinator: WorkspaceTerminationWatcher.Sink {
         // и теряет это соответствие. Стоимость 2-3 NSWorkspace-вызова на tier —
         // дешёво по сравнению с самим SIGSTOP.
         let tierName = tier == .tier1 ? "1" : "2"
+        // Signpost-interval на весь обход tier'а: в Instruments видно, сколько
+        // заняло решение и сколько pid'ов из кандидатов реально замёрзло
+        // (остальные — veto, уже замороженные, откаты).
+        let signpostId = Self.signposter.makeSignpostID()
+        let signpostState = Self.signposter.beginInterval(
+            "freeze-tier", id: signpostId,
+            "tier=\(tierName, privacy: .public) reason=\(reason, privacy: .public)"
+        )
+        var candidateCount = 0
+        var frozenCount = 0
+        defer {
+            Self.signposter.endInterval(
+                "freeze-tier", signpostState,
+                "candidates=\(candidateCount, privacy: .public) frozen=\(frozenCount, privacy: .public)"
+            )
+        }
         // Обход, который уже неактуален (Off/sleep за время предыдущего
         // tier'а или pacerAdjuster), не начинаем вовсе.
         if let stale = policyStaleReason(generation: generation) {
@@ -522,6 +538,7 @@ public actor VortexCoordinator: WorkspaceTerminationWatcher.Sink {
         }
         for bundleId in bundleIds {
             let pids = await finder.pids(forBundleIds: [bundleId])
+            candidateCount += pids.count
             for pid in pids {
                 // За `await finder.pids` или за предыдущий freezeProcess
                 // условия могли измениться — перепроверяем перед КАЖДЫМ SIGSTOP.
@@ -580,6 +597,7 @@ public actor VortexCoordinator: WorkspaceTerminationWatcher.Sink {
                 case .tier1: tier1Frozen.insert(pid)
                 case .tier2: tier2Frozen.insert(pid)
                 }
+                frozenCount += 1
                 await auditLog?.record(
                     op: "freeze", pid: pid, bundleId: bundleId,
                     tier: tierName, reason: reason, outcome: "ok"
