@@ -432,17 +432,14 @@ struct DaemonIPCHandler: IPCRequestHandler, Sendable {
                 do {
                     try await coordinator.loadModel(modelPath: mainPath)
                 } catch {
-                    // не fatal — summary всё равно попробуем
+                    log.warning("model swap back failed: \(error.localizedDescription, privacy: .public)")
                 }
             }
-            // LLM summary: читаем markdown сессии → генерируем → appendSection
-            if let sessionPath {
-                Task {
-                    await generateSessionSummary(
-                        sessionPath: sessionPath,
-                        coordinator: coordinator
-                    )
-                }
+            // Подсказка в лог — явный recap через отдельную команду
+            if let p = sessionPath,
+               let size = try? FileManager.default.attributesOfItem(atPath: p)[.size] as? Int,
+               size > 500 {
+                log.notice("session ready (\(size) bytes): run `froggy recap` to generate summary")
             }
             var r = IPCResponse()
             r.ok = true
@@ -529,6 +526,69 @@ struct DaemonIPCHandler: IPCRequestHandler, Sendable {
                 continuation.onTermination = { _ in task.cancel() }
             }
 
+        case "recap":
+            let coordinator = self.coordinator
+            let supervisor = self.audioSupervisor
+            let reqPath = request.path
+            return AsyncThrowingStream { continuation in
+                let task = Task {
+                    // Путь: явный аргумент или последняя сессия
+                    let sessionPath: String
+                    if let p = reqPath {
+                        sessionPath = p
+                    } else if let url = await supervisor.sessionURL() {
+                        sessionPath = url.path
+                    } else {
+                        var r = IPCResponse()
+                        r.ok = false; r.error = "no active session; use --path <file>"; r.final = true
+                        continuation.yield(r); continuation.finish(); return
+                    }
+                    guard let transcript = try? String(contentsOfFile: sessionPath, encoding: .utf8),
+                          transcript.count > 100 else {
+                        var r = IPCResponse()
+                        r.ok = false; r.error = "transcript too short or unreadable"; r.final = true
+                        continuation.yield(r); continuation.finish(); return
+                    }
+                    guard await coordinator.mlx.isLoaded() else {
+                        var r = IPCResponse()
+                        r.ok = false; r.error = "model not loaded — run `froggy load <path>` first"; r.final = true
+                        continuation.yield(r); continuation.finish(); return
+                    }
+                    let prompt = """
+                    Ниже транскрипт встречи. Напиши краткое резюме на русском языке:
+                    1. Что обсуждалось (3–5 пунктов).
+                    2. Принятые решения.
+                    3. Action items с владельцами (если упомянуты).
+                    Пиши лаконично, без вводных фраз.
+
+                    ---
+                    \(transcript.prefix(12000))
+                    """
+                    let mlxStream = await coordinator.mlx.generateStream(prompt: prompt, maxTokens: 600)
+                    var fullSummary = ""
+                    do {
+                        for try await chunk in mlxStream {
+                            fullSummary += chunk
+                            var r = IPCResponse()
+                            r.ok = true; r.text = chunk; r.final = false
+                            continuation.yield(r)
+                        }
+                    } catch {
+                        continuation.finish(throwing: error); return
+                    }
+                    // Записываем секцию в файл
+                    if let fh = FileHandle(forUpdatingAtPath: sessionPath) {
+                        fh.seekToEndOfFile()
+                        fh.write(Data("\n## Summary\n\n\(fullSummary)\n".utf8))
+                        try? fh.close()
+                    }
+                    var done = IPCResponse()
+                    done.ok = true; done.sessionURL = sessionPath; done.final = true
+                    continuation.yield(done); continuation.finish()
+                }
+                continuation.onTermination = { _ in task.cancel() }
+            }
+
         case "listenStream":
             let supervisor = self.audioSupervisor
             let store = self.contextStore
@@ -559,45 +619,6 @@ struct DaemonIPCHandler: IPCRequestHandler, Sendable {
         default:
             return nil
         }
-    }
-}
-
-// MARK: - LLM session summary
-
-private func generateSessionSummary(sessionPath: String, coordinator: VortexCoordinator) async {
-    let log = Logger(subsystem: "com.froggychips.froggy", category: "daemon")
-    guard await coordinator.mlx.isLoaded() else {
-        log.notice("session summary skipped — model not loaded")
-        return
-    }
-    guard let transcript = try? String(contentsOfFile: sessionPath, encoding: .utf8),
-          !transcript.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
-        log.warning("session summary skipped — transcript empty or unreadable")
-        return
-    }
-    let prompt = """
-    Ниже транскрипт встречи. Напиши краткое резюме на русском языке:
-    1. Что обсуждалось (3–5 пунктов).
-    2. Принятые решения.
-    3. Action items с владельцами (если упомянуты).
-    Пиши лаконично, без вводных фраз.
-
-    ---
-    \(transcript.prefix(12000))
-    """
-    do {
-        let summary = try await coordinator.generate(prompt: prompt, maxTokens: 600)
-        let section = "\n## Summary\n\n\(summary)\n"
-        guard let fh = FileHandle(forUpdatingAtPath: sessionPath) else {
-            log.warning("session summary: cannot open file for update")
-            return
-        }
-        fh.seekToEndOfFile()
-        fh.write(Data(section.utf8))
-        try? fh.close()
-        log.notice("session summary written to \(sessionPath, privacy: .public)")
-    } catch {
-        log.error("session summary failed: \(error.localizedDescription, privacy: .public)")
     }
 }
 

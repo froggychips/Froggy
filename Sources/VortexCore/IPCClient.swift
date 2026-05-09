@@ -184,6 +184,27 @@ public actor IPCClient {
         sendStream(IPCRequest(cmd: "listenStream"), timeout: .seconds(3600))
     }
 
+    /// Генерирует LLM-резюме последней сессии (или `path`) и стримит токены.
+    /// После завершения summary дописывается в markdown-файл сессии.
+    public nonisolated func recapStream(path: String? = nil) -> AsyncThrowingStream<String, any Error> {
+        let req = IPCRequest(cmd: "recap", path: path)
+        let upstream = sendStream(req, timeout: .seconds(300))
+        return AsyncThrowingStream { continuation in
+            let task = Task {
+                do {
+                    for try await response in upstream {
+                        if let text = response.text { continuation.yield(text) }
+                        if response.final == true { break }
+                    }
+                    continuation.finish()
+                } catch {
+                    continuation.finish(throwing: error)
+                }
+            }
+            continuation.onTermination = { _ in task.cancel() }
+        }
+    }
+
     // MARK: - BSD socket plumbing
 
     /// Открывает соединение, отправляет один запрос, читает строку-за-строкой.
