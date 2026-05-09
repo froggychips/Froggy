@@ -47,19 +47,32 @@ public struct MLXWorkerEvent: Codable, Sendable {
     public var message: String?
     /// Для `done` — путь модели после `load`-ack.
     public var modelPath: String?
+    /// Для `done` после generate — метрики из GenerateCompletionInfo.
+    public var promptTPS: Double?
+    public var decodeTPS: Double?
+    public var promptTokens: Int?
+    public var generatedTokens: Int?
 
     public init(
         event: String,
         requestId: String? = nil,
         text: String? = nil,
         message: String? = nil,
-        modelPath: String? = nil
+        modelPath: String? = nil,
+        promptTPS: Double? = nil,
+        decodeTPS: Double? = nil,
+        promptTokens: Int? = nil,
+        generatedTokens: Int? = nil
     ) {
         self.event = event
         self.requestId = requestId
         self.text = text
         self.message = message
         self.modelPath = modelPath
+        self.promptTPS = promptTPS
+        self.decodeTPS = decodeTPS
+        self.promptTokens = promptTokens
+        self.generatedTokens = generatedTokens
     }
 
     public static let ready = "ready"
