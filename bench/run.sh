@@ -77,13 +77,41 @@ case "$froggy_status_raw" in
   *"model_loaded     yes"*) [ "$scenario" = "idle" ] && scenario="model-loaded";;
 esac
 
-# 5. Time-to-first-token (если модель загружена)
+# 5. Time-to-first-token + decode TPS (если модель загружена)
 ttft_ms=null
+prefill_tps=null
+decode_tps=null
+prompt_tokens=null
+generated_tokens=null
 if [ "$scenario" = "model-loaded" ]; then
   start=$(python3 -c 'import time; print(int(time.time()*1000))')
   echo '{"cmd":"generate","prompt":"hi","maxTokens":1}' | nc -U "$SOCK" 2>/dev/null | head -1 >/dev/null
   end=$(python3 -c 'import time; print(int(time.time()*1000))')
   ttft_ms=$((end - start))
+
+  # Decode TPS: 100-токенная генерация, читаем done-event и берём метрики.
+  # done-event содержит promptTPS/decodeTPS/promptTokens/generatedTokens
+  # (KLEE-F, GenerateCompletionInfo из mlx-swift-lm).
+  gen_bench_raw="$(echo '{"cmd":"generate","prompt":"Describe memory management on Apple Silicon in detail.","maxTokens":100}' \
+    | nc -U "$SOCK" 2>/dev/null)"
+  if [ -n "$gen_bench_raw" ]; then
+    eval "$(echo "$gen_bench_raw" | python3 - <<'PY'
+import sys, json
+for line in sys.stdin:
+    try:
+        ev = json.loads(line.strip())
+    except Exception:
+        continue
+    if ev.get("event") == "done":
+        def fmt(v): return str(v) if v is not None else "null"
+        print(f"prefill_tps={fmt(ev.get('promptTPS'))}")
+        print(f"decode_tps={fmt(ev.get('decodeTPS'))}")
+        print(f"prompt_tokens={fmt(ev.get('promptTokens'))}")
+        print(f"generated_tokens={fmt(ev.get('generatedTokens'))}")
+        break
+PY
+)"
+  fi
 fi
 
 # 6. Compose JSON snapshot
@@ -109,6 +137,10 @@ snapshot=$(cat <<JSON
     "samples": $worker_rss_samples
   },
   "ttft_ms": $ttft_ms,
+  "prefill_tps": $prefill_tps,
+  "decode_tps": $decode_tps,
+  "prompt_tokens": $prompt_tokens,
+  "generated_tokens": $generated_tokens,
   "vm_stat_raw": $(printf '%s' "$vm_stat_raw" | python3 -c 'import json,sys; print(json.dumps(sys.stdin.read()))'),
   "memory_pressure_raw": $(printf '%s' "$mp_raw" | python3 -c 'import json,sys; print(json.dumps(sys.stdin.read()))'),
   "froggy_status": $(printf '%s' "${froggy_status_raw:-null}" | python3 -c 'import json,sys; s=sys.stdin.read().strip(); print(json.dumps(s) if s else "null")'),
