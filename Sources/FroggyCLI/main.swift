@@ -55,12 +55,15 @@ struct FroggyCLI {
         }
         let pairs: [(String, String)] = [
             ("capturing",       fmt(r.capturing)),
+            ("listening",       fmt(r.listening)),
             ("model_loaded",    fmt(r.modelLoaded)),
             ("model_path",      r.modelPath ?? "—"),
             ("memory_pressure", r.memoryPressure.map { "\($0)%" } ?? "—"),
             ("frozen_procs",    r.frozen.map(String.init) ?? "—"),
             ("snapshots",       r.snapshots.map(String.init) ?? "—"),
             ("capture_error",   r.lastCaptureError ?? "—"),
+            ("audio_output",    r.audioOutputDevice ?? "—"),
+            ("audio_input",     r.audioInputDevice ?? "—"),
         ]
         let width = pairs.map(\.0.count).max() ?? 0
         for (k, v) in pairs {
@@ -213,7 +216,9 @@ struct FroggyCLI {
     private static func runListenStatus(_ client: IPCClient) async throws {
         let r = try await client.listenStatus()
         if r.ok == true {
-            print("listening: \(r.listening == true ? "yes" : "no")")
+            print("listening:     \(r.listening == true ? "yes" : "no")")
+            print("audio_output:  \(r.audioOutputDevice ?? "—")")
+            print("audio_input:   \(r.audioInputDevice ?? "—")")
         } else {
             stderr(r.error ?? "listen-status failed"); exit(1)
         }

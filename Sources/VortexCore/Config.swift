@@ -39,6 +39,13 @@ public struct FroggyConfig: Codable, Sendable, Equatable {
     /// Путь к executable'у `FroggyAudioWorker`. По умолчанию — рядом с демоном.
     public var audioWorkerPath: String?
 
+    /// BCP-47 locale для SFSpeechRecognizer. По умолчанию "ru-RU".
+    public var audioLocale: String
+
+    /// Только on-device распознавание (не отправлять аудио в Apple cloud).
+    /// По умолчанию true — приватность важнее accuracy на рабочих созвонах.
+    public var audioOnDeviceRecognition: Bool
+
     /// Mem-5 этап 1: собирать ли телеметрию freeze/thaw в SQLite.
     /// На этапе 1 мы только пишем; ranking-overlay пойдёт отдельным PR'ом.
     /// См. ADR 0010.
@@ -73,6 +80,8 @@ public struct FroggyConfig: Codable, Sendable, Equatable {
         mlxWorkerPath: String? = nil,
         callModelPath: String? = nil,
         audioWorkerPath: String? = nil,
+        audioLocale: String = "ru-RU",
+        audioOnDeviceRecognition: Bool = true,
         freezeRankingEnabled: Bool = true,
         kvCacheBits: Int = 8,
         ipcSocketPath: String = FroggyConfig.defaultSocketPath,
@@ -94,6 +103,8 @@ public struct FroggyConfig: Codable, Sendable, Equatable {
         self.mlxWorkerPath = mlxWorkerPath
         self.callModelPath = callModelPath
         self.audioWorkerPath = audioWorkerPath
+        self.audioLocale = audioLocale
+        self.audioOnDeviceRecognition = audioOnDeviceRecognition
         self.freezeRankingEnabled = freezeRankingEnabled
         self.kvCacheBits = kvCacheBits
         self.ipcSocketPath = ipcSocketPath
@@ -157,6 +168,8 @@ public struct FroggyConfig: Codable, Sendable, Equatable {
         self.mlxWorkerPath = try c.decodeIfPresent(String.self, forKey: .mlxWorkerPath)
         self.callModelPath = try c.decodeIfPresent(String.self, forKey: .callModelPath)
         self.audioWorkerPath = try c.decodeIfPresent(String.self, forKey: .audioWorkerPath)
+        self.audioLocale = try c.decodeIfPresent(String.self, forKey: .audioLocale) ?? d.audioLocale
+        self.audioOnDeviceRecognition = try c.decodeIfPresent(Bool.self, forKey: .audioOnDeviceRecognition) ?? d.audioOnDeviceRecognition
         self.kvCacheBits = try c.decodeIfPresent(Int.self, forKey: .kvCacheBits) ?? d.kvCacheBits
 
         self.ipcSocketPath = try c.decodeIfPresent(String.self, forKey: .ipcSocketPath) ?? d.ipcSocketPath

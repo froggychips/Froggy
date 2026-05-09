@@ -98,7 +98,9 @@ struct FroggyDaemon {
             finder: reactiveFinder,
             workspaceSource: workspaceSource,
             callModelPath: config.callModelPath,
-            mainModelPath: config.modelPath
+            mainModelPath: config.modelPath,
+            audioLocale: config.audioLocale,
+            audioOnDeviceRecognition: config.audioOnDeviceRecognition
         )
         await coordinator.startMonitoring()
         // Termination-watcher: чистит FrozenPidsStore при внешнем kill'е.
@@ -136,7 +138,7 @@ struct FroggyDaemon {
             await registrar.register(into: registry)
         }
 
-        installSignalHandlers(coordinator: coordinator)
+        installSignalHandlers(coordinator: coordinator, audioSupervisor: audioSupervisor)
 
         if let modelPath = config.modelPath {
             do {
@@ -218,13 +220,15 @@ struct FroggyDaemon {
     /// `coordinator.emergencyThaw`, но даже если процесс умрёт раньше — pids
     /// останутся в `frozen.pids` и будут разморожены на следующем старте
     /// через `FrozenPidsStore.recover()`.
-    private static func installSignalHandlers(coordinator: VortexCoordinator) {
+    private static func installSignalHandlers(coordinator: VortexCoordinator, audioSupervisor: AudioSupervisor) {
         for sig in [SIGINT, SIGTERM] {
             signal(sig, SIG_IGN)
             let src = DispatchSource.makeSignalSource(signal: sig, queue: .main)
             src.setEventHandler {
                 log.notice("signal \(sig) received — shutting down")
                 Task {
+                    // Сначала останавливаем audio worker — иначе остаётся orphan-процессом.
+                    await audioSupervisor.shutdown()
                     // Bug-6: до exit'а **обязательно** kill'нуть MLX worker.
                     // Без этого worker остаётся orphan'ом (PPID=1, ~935 MB
                     // RAM висит до manual cleanup / reboot'а). MLXSupervisor
@@ -288,6 +292,9 @@ struct DaemonIPCHandler: IPCRequestHandler, Sendable {
             r.snapshots = await contextStore.count()
             r.lastCaptureError = await vision.lastCaptureError()
             r.kvCacheBits = await coordinator.mlx.currentKVCacheBits()
+            r.listening = await audioSupervisor.isCapturing()
+            r.audioOutputDevice = AudioSupervisor.currentOutputDeviceName()
+            r.audioInputDevice = AudioSupervisor.currentInputDeviceName()
             r.final = true
             return r
 
@@ -325,6 +332,9 @@ struct DaemonIPCHandler: IPCRequestHandler, Sendable {
         case "loadModel":
             guard let path = request.path else {
                 return .failure("missing 'path'")
+            }
+            if await audioSupervisor.isCapturing() {
+                return .failure("cannot swap model during active listen session — call listen-stop first")
             }
             do {
                 try await coordinator.loadModel(modelPath: path)
@@ -390,10 +400,16 @@ struct DaemonIPCHandler: IPCRequestHandler, Sendable {
                 }
             }
             do {
-                try await audioSupervisor.startCapture(discordPid: request.discordPid)
+                try await audioSupervisor.startCapture(
+                    discordPid: request.discordPid,
+                    locale: coordinator.audioLocale,
+                    onDeviceRecognition: coordinator.audioOnDeviceRecognition
+                )
                 var r = IPCResponse()
                 r.ok = true
                 r.listening = true
+                r.audioOutputDevice = AudioSupervisor.currentOutputDeviceName()
+                r.audioInputDevice = AudioSupervisor.currentInputDeviceName()
                 r.final = true
                 return r
             } catch {
@@ -421,6 +437,8 @@ struct DaemonIPCHandler: IPCRequestHandler, Sendable {
             var r = IPCResponse()
             r.ok = true
             r.listening = await audioSupervisor.isCapturing()
+            r.audioOutputDevice = AudioSupervisor.currentOutputDeviceName()
+            r.audioInputDevice = AudioSupervisor.currentInputDeviceName()
             r.final = true
             return r
 
@@ -494,6 +512,7 @@ struct DaemonIPCHandler: IPCRequestHandler, Sendable {
 
         case "listenStream":
             let supervisor = self.audioSupervisor
+            let store = self.contextStore
             return AsyncThrowingStream { continuation in
                 let task = Task {
                     let (stream, subID) = await supervisor.subscribeToTranscripts()
@@ -501,6 +520,11 @@ struct DaemonIPCHandler: IPCRequestHandler, Sendable {
                         Task { await supervisor.unsubscribe(id: subID) }
                     }
                     for await event in stream {
+                        // Финальные сегменты пушим в ContextStore — чтобы
+                        // `froggy gen --context "подведи итог"` видел транскрипт.
+                        if event.isFinal {
+                            await store.push(lines: ["[\(event.speaker)] \(event.text)"])
+                        }
                         var r = IPCResponse()
                         r.ok = true
                         r.text = event.text

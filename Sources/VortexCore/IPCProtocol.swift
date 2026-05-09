@@ -77,6 +77,11 @@ public struct IPCResponse: Codable, Sendable {
     public var listening: Bool?
     /// Для streaming транскрипта: спикер ("mic" | "discord").
     public var speaker: String?
+    /// Имя дефолтного output-устройства (AirPods Pro, MacBook Speakers, …).
+    /// Помогает клиенту определить нужен ли echo detection.
+    public var audioOutputDevice: String?
+    /// Имя дефолтного input-устройства (Built-in Microphone, AirPods, …).
+    public var audioInputDevice: String?
 
     public init() {}
 

@@ -6,11 +6,23 @@ public struct AudioWorkerCommand: Codable, Sendable {
     /// PID процесса Discord для CATapDescription.
     public var discordPid: Int32?
     public var requestId: String?
+    /// BCP-47 locale для SFSpeechRecognizer (например "ru-RU", "en-US").
+    public var locale: String?
+    /// Если true — только on-device распознавание (приватность, без Apple cloud).
+    public var onDeviceRecognition: Bool?
 
-    public init(cmd: String, discordPid: Int32? = nil, requestId: String? = nil) {
+    public init(
+        cmd: String,
+        discordPid: Int32? = nil,
+        requestId: String? = nil,
+        locale: String? = nil,
+        onDeviceRecognition: Bool? = nil
+    ) {
         self.cmd = cmd
         self.discordPid = discordPid
         self.requestId = requestId
+        self.locale = locale
+        self.onDeviceRecognition = onDeviceRecognition
     }
 
     public static let startCapture = "startCapture"
