@@ -92,6 +92,64 @@ loop. Не покрыто:
 * race condition между `unloadModel` и активным generate-stream'ом.
 * RSS-leak верификация на 100+ циклах load/unload.
 
+### Thaw latency: visible UX feedback (наблюдение 2026-05-09 live session)
+Auto-thaw на frontmost-change (ADR-0015) **работает** — лог подтверждает
+`frontmost activated mid-freeze: thawing pid=NNNNN` за 2 ms. Но
+visible-to-user latency высокая: после `SIGCONT` heavy app (Telegram,
+Electron-renderer, ~1 GB резидента, частично в swap) **нужно 1–2 s на
+repaint**. Юзер видит «не реагирует», предполагает что app сломан, не
+понимает что происходит.
+
+Возможные направления (от дешёвого к сложному):
+
+* **Visual feedback в MenuBar.** Toast / status-line «Telegram
+  размораживается…» при auto-thaw. Юзер видит что что-то делается.
+  ~1 час.
+* **Документация в README.** Честный disclaimer: «expect 1–2 s delay
+  when re-activating an app frozen during sustained pressure». ~10 мин.
+* **Pre-emptive thaw on intent signals.** Слушать события до
+  `didActivateApplication` (cmd-tab началась, mouse down on dock).
+  Проблема: нет публичного API на dock click, CGS private — TCC и
+  stability tradeoff. Не v1.0.
+* **Force-pagein после `SIGCONT`.** Aggressively read pages из swap
+  обратно в RAM до того, как юзер ждёт. Не уверен, есть ли публичный
+  API. Не v1.0.
+
+**v1.0 scope:** только первые два — visual feedback + README disclaimer.
+ADR-кандидат: «User-perceived thaw latency: feedback + documented
+expectation».
+
+### Snapshots = bounded window, не lifetime counter (наблюдение 2026-05-09)
+В `froggy status` поле `snapshots` показывает текущий размер
+context-store'а. Capacity = 30. Поведение в реальном запуске:
+ramp-up 0 → 12 → 18 → 30 за время load + gen, дальше **плато на 30**
+35+ минут, даже при активном переключении окон.
+
+**Симптом:** выглядит как «застрявший счётчик» при быстром взгляде на
+status. Реально — нормальная bounded-queue dynamics, новые OCR
+вытесняют старые.
+
+**Структурная проблема, не косметика:**
+* Window 30 × 2 s = **60 s history**.
+* `gen --context` суёт в prompt **все 30** кадров.
+* Если экран изменился 30 s назад, half of context — устаревшая.
+* Модель отвечает не «что на экране **сейчас**», а «что было за
+  последнюю минуту суммарно». Это и есть source of hallucinations,
+  замеченных в утренней live-сессии (упоминание «CronJob» которого
+  на экране в момент запроса не было).
+
+**v1.0 scope (минимум):**
+* Сделать видимым в `froggy status`: `snapshots 30/30 (window-cap)`
+  или `snapshots 30 (last 60s)` вместо просто `30`.
+* README disclaimer: «context is last-60-seconds, not current frame».
+
+**Не v1.0, в v1.1:**
+* Recency-weighted ranking в context'е (свежий кадр > старый).
+  Похоже на Mem-5 этап 2 ranking-overlay по форме, но другая
+  поверхность (OCR context, не freeze ranking).
+* Frame-diff aware dedup: 5 идентичных кадров подряд → 1 entry с
+  timestamp-range. Освобождает window под разнообразную историю.
+
 ## Этап 1 не сделан в этой сессии
 **`/froggy-bench --save` × 3 сценария** (idle / model-loaded /
 under-pressure) — gate из плана. Я не могу запустить полноценный
