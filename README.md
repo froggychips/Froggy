@@ -22,7 +22,7 @@ daemon, so you can drive it from any language.
 **Status:** working personal-use scaffolding. Not a product. See
 [`docs/POSITIONING.md`](docs/POSITIONING.md) for what this is and isn't.
 
-📖 [THESIS](docs/THESIS.md) · [POSITIONING](docs/POSITIONING.md) · [ADRs](docs/adr/) · [Packaging](packaging/README.md)
+📖 [THESIS](docs/THESIS.md) · [POSITIONING](docs/POSITIONING.md) · [FAQ](docs/FAQ.md) · [ADRs](docs/adr/) · [Packaging](packaging/README.md)
 📬 Contact: [@froggychips](https://t.me/froggychips) on Telegram
 📜 License: [MIT](LICENSE)
 
@@ -132,6 +132,32 @@ echo '{"cmd":"generate","prompt":"hi","useContext":true,"maxTokens":50}' \
 Or via the menubar app: `swift run FroggyMenuBar` — a frog icon in the
 menu bar with status, model-path field, Load/Unload, recent context, and
 Thaw all.
+
+## Using Froggy as a memory-pressure daemon (no LLM)
+
+If you already use Ollama, LM Studio, or another local LLM tool and just want
+the memory-management subsystem, run the daemon without a model:
+
+```sh
+# No --model-path — daemon weighs ~50 MB, all freeze/thaw logic still runs.
+.build/release/FroggyDaemon
+```
+
+`MemoryPressureMonitor` still watches `dispatch_source_memorypressure` and
+freeze/thaws your configured apps. Configure which processes to freeze in
+`config.json` — including the LLM tool's support apps (e.g., the Electron
+shell that Ollama's web UI runs in) — so the *inference* process gets more
+unified memory when pressure rises.
+
+```json
+{
+  "freezeTier1BundleIds": ["com.spotify.client", "com.hnc.Discord"],
+  "freezeTier2BundleIds": ["com.tinyspeck.slackmacgap", "notion.id"]
+}
+```
+
+Screen capture and context window work as usual; `generate` / `loadModel`
+commands return an error until a model is loaded via `froggy load <path>`.
 
 ## Context-aware generation
 
