@@ -209,8 +209,10 @@ struct FroggyCLI {
 
     private static func runListenStop(_ client: IPCClient) async throws {
         let r = try await client.listenStop()
-        if r.ok == true { print("stopped") }
-        else { stderr(r.error ?? "listen-stop failed"); exit(1) }
+        if r.ok == true {
+            print("stopped")
+            if let path = r.sessionURL { print("session:  \(path)") }
+        } else { stderr(r.error ?? "listen-stop failed"); exit(1) }
     }
 
     private static func runListenStatus(_ client: IPCClient) async throws {
@@ -219,6 +221,7 @@ struct FroggyCLI {
             print("listening:     \(r.listening == true ? "yes" : "no")")
             print("audio_output:  \(r.audioOutputDevice ?? "—")")
             print("audio_input:   \(r.audioInputDevice ?? "—")")
+            if let path = r.sessionURL { print("session:       \(path)") }
         } else {
             stderr(r.error ?? "listen-status failed"); exit(1)
         }

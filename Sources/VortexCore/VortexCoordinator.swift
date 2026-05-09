@@ -36,6 +36,9 @@ public actor VortexCoordinator: WorkspaceTerminationWatcher.Sink {
     public nonisolated let echoSuppressionEnabled: Bool
     /// Хвост mic-gate после последнего Discord-аудио (мс).
     public nonisolated let echoSuppressionTailMs: Int
+    /// VAD: пропускать mic-буферы тише vadRmsThreshold.
+    public nonisolated let vadEnabled: Bool
+    public nonisolated let vadRmsThreshold: Double
 
     private let finder: any ProcessFinder
     private let workspaceSource: (any WorkspaceEventSource)?
@@ -79,7 +82,9 @@ public actor VortexCoordinator: WorkspaceTerminationWatcher.Sink {
         audioLocale: String = "ru-RU",
         audioOnDeviceRecognition: Bool = true,
         echoSuppressionEnabled: Bool = true,
-        echoSuppressionTailMs: Int = 400
+        echoSuppressionTailMs: Int = 400,
+        vadEnabled: Bool = true,
+        vadRmsThreshold: Double = 0.008
     ) {
         self.mlx = mlx
         self.vortex = vortex
@@ -95,6 +100,8 @@ public actor VortexCoordinator: WorkspaceTerminationWatcher.Sink {
         self.audioOnDeviceRecognition = audioOnDeviceRecognition
         self.echoSuppressionEnabled = echoSuppressionEnabled
         self.echoSuppressionTailMs = echoSuppressionTailMs
+        self.vadEnabled = vadEnabled
+        self.vadRmsThreshold = vadRmsThreshold
     }
 
     // MARK: - Lifecycle

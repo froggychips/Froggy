@@ -67,15 +67,17 @@ final class AudioRuntime: @unchecked Sendable {
     private var micRequest: SFSpeechAudioBufferRecognitionRequest?
     private var micTask: SFSpeechRecognitionTask?
 
-    // Echo suppression
-    // Записываются из main thread в startCapture, читаются из audio render thread
-    // в tap-callback'ах. Double-запись на arm64 атомарна; race здесь безвреден.
+    // Echo suppression + VAD
+    // Записываются из main thread в startCapture, читаются из audio render thread.
+    // Double/Float запись на arm64 атомарна; race здесь безвреден.
     private var echoSuppressionEnabled = false
     private var echoTailSeconds: TimeInterval = 0.4
     /// Монотонное время (ProcessInfo.systemUptime) последнего активного Discord-буфера.
     private var lastDiscordAudioTime: TimeInterval = -.infinity
     /// Порог RMS (~-46 dBFS) — ниже считаем тишиной Discord.
     private let echoRmsThreshold: Float = 0.005
+    private var vadEnabled = true
+    private var vadThreshold: Float = 0.008
 
     init(log: Logger, defaultDiscordPid: Int32?) {
         self.log = log
@@ -130,10 +132,13 @@ final class AudioRuntime: @unchecked Sendable {
             let onDevice = cmd.onDeviceRecognition ?? true
             let echoEnabled = cmd.echoSuppression ?? true
             let echoTailMs = cmd.echoSuppressionTailMs ?? 400
+            let vadEn = cmd.vadEnabled ?? true
+            let vadThresh = Float(cmd.vadRmsThreshold ?? 0.008)
             DispatchQueue.main.async { [weak self] in
                 self?.startCapture(discordPid: pid, requestId: cmd.requestId,
                                    locale: locale, onDeviceRecognition: onDevice,
-                                   echoSuppression: echoEnabled, echoSuppressionTailMs: echoTailMs)
+                                   echoSuppression: echoEnabled, echoSuppressionTailMs: echoTailMs,
+                                   vadEnabled: vadEn, vadRmsThreshold: vadThresh)
             }
 
         case AudioWorkerCommand.stopCapture:
@@ -157,12 +162,14 @@ final class AudioRuntime: @unchecked Sendable {
 
     // MARK: - Capture lifecycle (main thread)
 
-    private func startCapture(discordPid: Int32?, requestId: String?, locale: String, onDeviceRecognition: Bool, echoSuppression: Bool, echoSuppressionTailMs: Int) {
+    private func startCapture(discordPid: Int32?, requestId: String?, locale: String, onDeviceRecognition: Bool, echoSuppression: Bool, echoSuppressionTailMs: Int, vadEnabled: Bool, vadRmsThreshold: Float) {
         stopCapture() // clean slate
 
         echoSuppressionEnabled = echoSuppression
         echoTailSeconds = Double(echoSuppressionTailMs) / 1000.0
         lastDiscordAudioTime = -.infinity
+        self.vadEnabled = vadEnabled
+        self.vadThreshold = vadRmsThreshold
 
         recognizer = SFSpeechRecognizer(locale: Locale(identifier: locale))
         recognizer?.defaultTaskHint = .dictation
@@ -334,6 +341,10 @@ final class AudioRuntime: @unchecked Sendable {
             if let s = self, s.echoSuppressionEnabled {
                 let sinceDiscord = ProcessInfo.processInfo.systemUptime - s.lastDiscordAudioTime
                 if sinceDiscord < s.echoTailSeconds { return }
+            }
+            // VAD gate: пропускаем только если RMS выше порога тишины.
+            if let s = self, s.vadEnabled {
+                if Self.bufferRMS(buffer) < s.vadThreshold { return }
             }
             req?.append(buffer)
         }

@@ -14,6 +14,10 @@ public struct AudioWorkerCommand: Codable, Sendable {
     public var echoSuppression: Bool?
     /// Сколько мс держать mic-gate после последнего Discord-аудио.
     public var echoSuppressionTailMs: Int?
+    /// VAD: пропускать mic-буферы тише порога.
+    public var vadEnabled: Bool?
+    /// Порог RMS для VAD (0.008 ≈ -42 dBFS).
+    public var vadRmsThreshold: Double?
 
     public init(
         cmd: String,
@@ -22,7 +26,9 @@ public struct AudioWorkerCommand: Codable, Sendable {
         locale: String? = nil,
         onDeviceRecognition: Bool? = nil,
         echoSuppression: Bool? = nil,
-        echoSuppressionTailMs: Int? = nil
+        echoSuppressionTailMs: Int? = nil,
+        vadEnabled: Bool? = nil,
+        vadRmsThreshold: Double? = nil
     ) {
         self.cmd = cmd
         self.discordPid = discordPid
@@ -31,6 +37,8 @@ public struct AudioWorkerCommand: Codable, Sendable {
         self.onDeviceRecognition = onDeviceRecognition
         self.echoSuppression = echoSuppression
         self.echoSuppressionTailMs = echoSuppressionTailMs
+        self.vadEnabled = vadEnabled
+        self.vadRmsThreshold = vadRmsThreshold
     }
 
     public static let startCapture = "startCapture"

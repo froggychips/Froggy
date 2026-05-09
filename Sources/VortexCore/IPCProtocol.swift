@@ -82,6 +82,8 @@ public struct IPCResponse: Codable, Sendable {
     public var audioOutputDevice: String?
     /// Имя дефолтного input-устройства (Built-in Microphone, AirPods, …).
     public var audioInputDevice: String?
+    /// Путь к markdown-файлу текущей/последней сессии созвона.
+    public var sessionURL: String?
 
     public init() {}
 
