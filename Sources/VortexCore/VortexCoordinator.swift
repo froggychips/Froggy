@@ -338,6 +338,18 @@ public actor VortexCoordinator: WorkspaceTerminationWatcher.Sink {
     private func freezeTier(_ tier: Tier) async {
         let bundleIds = tier == .tier1 ? tier1BundleIds : tier2BundleIds
         let pids = await finder.pids(forBundleIds: bundleIds)
+        // Signpost-interval на весь цикл freezeTier — видно в Instruments
+        // длительность принятия решения и сколько pid'ов реально замёрзло.
+        let signpostId = Self.signposter.makeSignpostID()
+        let signpostState = Self.signposter.beginInterval(
+            "freeze-tier", id: signpostId,
+            "tier=\(String(describing: tier), privacy: .public) candidates=\(pids.count, privacy: .public)"
+        )
+        var frozenCount = 0
+        defer {
+            Self.signposter.endInterval("freeze-tier", signpostState,
+                                         "frozen=\(frozenCount, privacy: .public)")
+        }
         for pid in pids {
             // Skip уже-замороженные в любом из tier'ов.
             if tier1Frozen.contains(pid) || tier2Frozen.contains(pid) { continue }
@@ -355,6 +367,7 @@ public actor VortexCoordinator: WorkspaceTerminationWatcher.Sink {
                 case .tier1: tier1Frozen.insert(pid)
                 case .tier2: tier2Frozen.insert(pid)
                 }
+                frozenCount += 1
             } catch {
                 Self.log.warning("freeze pid=\(pid) tier=\(String(describing: tier), privacy: .public) skipped: \(error.localizedDescription, privacy: .public)")
             }
