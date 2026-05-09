@@ -393,6 +393,24 @@ struct DaemonIPCHandler: IPCRequestHandler, Sendable {
             r.final = true
             return r
 
+        case "speak":
+            guard let text = request.prompt, !text.isEmpty else {
+                return .failure("missing text")
+            }
+            let proc = Process()
+            proc.executableURL = URL(fileURLWithPath: "/usr/bin/say")
+            // request.path — опциональный голос, напр. "Milena" (ru) или "Samantha" (en)
+            if let voice = request.path {
+                proc.arguments = ["-v", voice, text]
+            } else {
+                proc.arguments = [text]
+            }
+            try? proc.run()
+            await withCheckedContinuation { cont in
+                proc.terminationHandler = { _ in cont.resume() }
+            }
+            return .success()
+
         case "freeze":
             let targetPid: Int32
             if let pid = request.pid {
