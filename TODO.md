@@ -4,6 +4,15 @@
 рефакторим». Если из этого списка что-то всплыло во время работы над
 другой задачей, не трогаем здесь и сейчас.
 
+## Code freeze (Sources/**)
+
+Действует с 2026-05-09. Снимается при выполнении **одного** из условий:
+* Успешный E2E тест аудио на реальном созвоне (Discord + mic, финальный
+  транскрипт записан в markdown, `froggy recap` отдал summary).
+* Или явное решение пользователя «снимаем freeze».
+
+До снятия: CI/Makefile/docs/issues/tests через fake-worker — разрешены.
+
 ## Validation gate (блокирует всё)
 
 **Прежде чем браться за AD-1 / FCP-1 / EXP-1 / Уровень 2 — снять
@@ -181,6 +190,17 @@ THESIS называет это thesis-level failure, не баг.
 
 ADR обязателен (новый сигнал, расширение threat model). Ref:
 [`docs/design/activity-detection.md`](design/activity-detection.md).
+
+### QW-0 — Calendar accessor (EventKit) (после снятия freeze Sources/**)
+
+`CalendarAccessor` в `LushaExperimental`. EventKit → текущие и ближайшие
+события из Calendar.app: название, участники, время, описание. Отдаётся в
+контекст LLM перед созвоном — модель знает тему и участников.
+Entitlement: `NSCalendarsUsageDescription`.
+
+Синергия с аудио: если `listen` запущен и есть активное событие — его
+summary автоматически добавляется в начало transcript-файла сессии.
+~40 строк accessor + plist. Ref: Grok review 2026-05-09 (Calendar accessor).
 
 ### QW-1 — URL-accessor (Apple Events) (после снятия freeze Sources/**)
 
@@ -564,6 +584,11 @@ let response = try await session.respond(to: prompt)
   KV-cache control, speculative decoding, sampling tunability,
   машины без Apple Intelligence enabled.
 
+**Важно для audio pipeline:** тот же вопрос стоит и про Speech:
+заменит ли Apple Speech framework из macOS 26 нашу связку
+SFSpeechRecognizer (Phase 1) / WhisperMLX (Phase 3)? Exploration
+должен ответить и на это — не только «заменит ли MLX для chat».
+
 ### Что должно быть в exploration
 
 * Что из Уровня 2 (voice / VLM / persona-router) **уже** есть у
@@ -689,6 +714,12 @@ RFC — **между** ними, не вместо них и не блокиру
 * **SwiftData / Core Data вместо SQLite3.** Replacing for
   replacement's sake; миграции уже описаны.
 
+### Shell completions для froggy CLI (после снятия freeze Sources/**)
+
+`bash` / `zsh` / `fish` completions для всех команд froggy. Генерируется
+через `ArgumentParser` если перейдём на него, иначе руками в
+`Sources/FroggyCLI/Completions/`. ~50 строк, нулевые зависимости.
+
 ## Меньшие хвосты
 * `/security-review` на Mem-5 (SQLite + телеметрия) — формально
   пропущен в автономном режиме. ADR 0010 содержит security-секцию
@@ -749,11 +780,14 @@ RFC — **между** ними, не вместо них и не блокиру
 
 ## Peer research — cherry-pick кандидаты
 
-* **MLX-перф из Klee:** см. [`docs/peer-research/klee-mlx-optimizations.md`](docs/peer-research/klee-mlx-optimizations.md).
-  Пять оптимизаций для `FroggyMLXWorker` (Metal warmup, `Memory.cacheLimit`,
-  `prefillStepSize`/sampler nuances, `ModelConfiguration(directory:)`,
-  TokenizerPatcher) + бонус про точные bench-метрики через
-  `GenerateCompletionInfo`. Применять после снятия freeze на `Sources/`.
+* **MLX-перф из Klee** (частично done):
+  - ✅ KLEE-A: Metal warmup после loadModel
+  - ✅ KLEE-B: `Memory.cacheLimit = recommended * 0.75`
+  - ✅ KLEE-C: проверен, defaults уже корректны (prefillStepSize=512, topP=1.0)
+  - ✅ KLEE-F: `GenerateCompletionInfo` метрики в done-event + bench fix
+  - ⬜ `ModelConfiguration(directory:)` вместо URL — после снятия freeze
+  - ⬜ `TokenizerPatcher` — после снятия freeze
+  Ref: [`docs/peer-research/klee-mlx-optimizations.md`](docs/peer-research/klee-mlx-optimizations.md).
 
 * **Competitor analysis (Memento / Klee / ChatMLX):** см.
   [`docs/peer-research/competitor-analysis.md`](docs/peer-research/competitor-analysis.md).
@@ -771,8 +805,20 @@ RFC — **между** ними, не вместо них и не блокиру
   Discord audio + микрофон → WhisperMLX (preview малой моделью + finalize
   large-v3) → markdown + LLM summary через `FroggyMLXWorker` + Jira draft
   через Atlassian MCP. Hybrid realtime/batch, MVP без diarization.
-* **Prior art (главный):** собственный
-  [`froggychips/interview-assistant`](https://github.com/froggychips/interview-assistant) —
-  готовый production-grade audio capture + WhisperMLX. На 70-80%
-  портируется в Froggy. Перед Phase 1 — выяснить **почему именно
-  прототип не работает**, чтобы не унаследовать блокер.
+
+**Статус по фазам:**
+
+* ✅ **Phase 1** — CATap + AVAudioEngine + SFSpeechRecognizer + IPC
+  (`listen` / `listen-stop` / `listen-stream` / `listen-status`)
+* ✅ **Phase 2** — VAD gate, echo suppression, SessionStore markdown,
+  `froggy recap` (on-demand LLM summary, streaming)
+* ⬜ **Phase 3** — WhisperMLX замена SFSpeechRecognizer. Блокируется
+  audit'ом `froggychips/interview-assistant`: выяснить почему CATap
+  был отброшен в том прототипе, чтобы не унаследовать блокер.
+  После снятия code freeze на `Sources/`.
+* ⬜ **Phase 4** — Jira task auto-detection во время созвона +
+  Atlassian MCP `createJiraIssue` / `addCommentToJiraIssue` из summary.
+
+* **Prior art:** [`froggychips/interview-assistant`](https://github.com/froggychips/interview-assistant) —
+  production-grade audio capture + WhisperMLX. Phase 3 не стартовать
+  без его audit'а.
