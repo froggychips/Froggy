@@ -1,12 +1,15 @@
 #!/bin/bash
-# benchmark.sh — сравниваем Ollama vs Froggy: память, свап, скорость инференса
+# benchmark.sh — сравниваем LM Studio / Ollama / Froggy: память, свап, скорость инференса
 #
-# Использование: ./scripts/benchmark.sh [ollama|froggy] [--power]
+# Использование: ./scripts/benchmark.sh [lmstudio|ollama|froggy] [--power]
 #   --power  собирать powermetrics (требует sudo, запускать как: sudo -E ./benchmark.sh ...)
 #
-# Что сравниваем: НЕ просто две модели, а два подхода к memory orchestration:
-#   ollama  — стандартный запуск, macOS управляет памятью самостоятельно
-#   froggy  — daemon с freeze/thaw + forced pageout фоновых приложений
+# Что сравниваем: НЕ просто модели, а подходы к memory orchestration:
+#   lmstudio — llama.cpp (LM Studio API localhost:1234), macOS управляет памятью стандартно
+#   ollama   — стандартный запуск, macOS управляет памятью стандартно
+#   froggy   — MLX daemon с freeze/thaw + forced pageout фоновых приложений
+#
+# Рекомендуемый порядок: lmstudio → froggy (одна и та же архитектура модели — Llama 3.2 1B)
 #
 # Длительность: 60 минут. Запускать после перезагрузки, чистое состояние.
 #
@@ -19,9 +22,9 @@
 set -euo pipefail
 
 # ── Параметры ──────────────────────────────────────────────────────────────────
-SESSION="${1:?Использование: ./scripts/benchmark.sh [ollama|froggy] [--power]}"
-[[ "$SESSION" == "ollama" || "$SESSION" == "froggy" ]] || {
-    echo "SESSION должен быть 'ollama' или 'froggy'" >&2; exit 1
+SESSION="${1:?Использование: ./scripts/benchmark.sh [lmstudio|ollama|froggy] [--power]}"
+[[ "$SESSION" == "lmstudio" || "$SESSION" == "ollama" || "$SESSION" == "froggy" ]] || {
+    echo "SESSION должен быть 'lmstudio', 'ollama' или 'froggy'" >&2; exit 1
 }
 POWER_MODE=false
 [[ "${2:-}" == "--power" ]] && POWER_MODE=true
@@ -30,7 +33,10 @@ DURATION_SEC=3600
 METRICS_INTERVAL=30
 PROMPT_INTERVAL=300
 
-OLLAMA_MODEL="qwen2.5:3b"
+# Модели: Llama 3.2 1B существует в обоих форматах — чистое сравнение без разницы моделей
+LMSTUDIO_URL="http://localhost:1234/v1"
+LMSTUDIO_MODEL=""          # если пусто — определяется автоматически из /v1/models
+OLLAMA_MODEL="llama3.2:1b-instruct-q4_K_M"
 FROGGY_MODEL="qwen3-4b-4bit"
 FROGGY_SOCKET="$HOME/Library/Application Support/Froggy/froggy.sock"
 MAX_TOKENS=200
@@ -89,7 +95,7 @@ get_free_pct() {
 }
 
 get_froggy_frozen() {
-    [[ "$SESSION" != "froggy" ]] && { echo "0"; return; }
+    [[ "$SESSION" == "froggy" ]] || { echo "0"; return; }
     echo '{"cmd":"pressure"}' \
         | nc -U "$FROGGY_SOCKET" -W 1 2>/dev/null \
         | python3 -c "
@@ -104,6 +110,48 @@ for line in sys.stdin:
 }
 
 # ── Инференс ───────────────────────────────────────────────────────────────────
+run_lmstudio() {
+    local prompt="$1"
+    local t0 t1 resp tokens elapsed_ms tps model_id
+    model_id="${LMSTUDIO_MODEL:-$(lmstudio_model_id)}"
+    t0=$(ms_now)
+    resp=$(curl -s --max-time 180 -X POST "${LMSTUDIO_URL}/chat/completions" \
+        -H "Content-Type: application/json" \
+        -d "$(python3 -c "
+import sys, json
+print(json.dumps({
+    'model': '${model_id}',
+    'messages': [{'role': 'user', 'content': sys.stdin.read().strip()}],
+    'max_tokens': ${MAX_TOKENS},
+    'stream': False
+}))
+" <<< "$prompt")")
+    t1=$(ms_now)
+    elapsed_ms=$((t1 - t0))
+    tokens=$(echo "$resp" | python3 -c "
+import sys, json
+try:
+    d = json.load(sys.stdin)
+    print(d.get('usage', {}).get('completion_tokens', 0))
+except: print(0)
+" 2>/dev/null || echo "0")
+    tps=$(python3 -c "print(round($tokens/($elapsed_ms/1000),1) if $elapsed_ms>0 and $tokens>0 else 0)")
+    echo "${elapsed_ms} ${tokens} ${tps}"
+}
+
+lmstudio_model_id() {
+    curl -s --max-time 5 "${LMSTUDIO_URL}/models" \
+        | python3 -c "
+import sys, json
+try:
+    d = json.load(sys.stdin)
+    models = d.get('data', [])
+    if models: print(models[0]['id'])
+    else: print('local-model')
+except: print('local-model')
+" 2>/dev/null || echo "local-model"
+}
+
 run_ollama() {
     local prompt="$1"
     local t0 t1 resp tokens elapsed_ms tps
@@ -148,7 +196,18 @@ print(n)
 
 # ── Проверка готовности ────────────────────────────────────────────────────────
 check_ready() {
-    if [[ "$SESSION" == "ollama" ]]; then
+    if [[ "$SESSION" == "lmstudio" ]]; then
+        local model_id
+        model_id=$(lmstudio_model_id)
+        [[ "$model_id" == "local-model" ]] && {
+            curl -s --max-time 5 "${LMSTUDIO_URL}/models" >/dev/null 2>&1 || {
+                echo "LM Studio не отвечает. Запусти LM Studio → Local Server → Start Server" >&2; exit 1
+            }
+            echo "LM Studio API доступна, но моделей не найдено — загрузи модель в LM Studio" >&2; exit 1
+        }
+        [[ -z "$LMSTUDIO_MODEL" ]] && LMSTUDIO_MODEL="$model_id"
+        log "LM Studio доступна (модель: $LMSTUDIO_MODEL)."
+    elif [[ "$SESSION" == "ollama" ]]; then
         curl -s --max-time 5 http://localhost:11434/api/tags >/dev/null 2>&1 || {
             echo "Ollama не отвечает. Запусти: ollama serve" >&2; exit 1
         }
@@ -257,11 +316,11 @@ prompts_loop() {
         now=$(date +%s); elapsed=$((now - start_ts))
         log "Промпт $((idx+1)) [${ptype}]: ${prompt:0:55}…"
 
-        if [[ "$SESSION" == "ollama" ]]; then
-            read -r elapsed_ms tokens tps <<< "$(run_ollama "$prompt")"
-        else
-            read -r elapsed_ms tokens tps <<< "$(run_froggy "$prompt")"
-        fi
+        case "$SESSION" in
+            lmstudio) read -r elapsed_ms tokens tps <<< "$(run_lmstudio "$prompt")" ;;
+            ollama)   read -r elapsed_ms tokens tps <<< "$(run_ollama "$prompt")" ;;
+            froggy)   read -r elapsed_ms tokens tps <<< "$(run_froggy "$prompt")" ;;
+        esac
 
         log "  → ${tokens} tok, ${tps} tok/s, ${elapsed_ms}ms"
         echo "${now},${elapsed},$((idx+1)),${ptype},${elapsed_ms},${tokens},${tps}" >> "$PROMPTS_CSV"
@@ -289,11 +348,11 @@ write_summary() {
         echo ""
         echo "КОНТЕКСТ СРАВНЕНИЯ"
         echo "  Тестируем не модели — тестируем memory orchestration:"
-        if [[ "$SESSION" == "ollama" ]]; then
-            echo "  ollama ($OLLAMA_MODEL) — macOS управляет памятью стандартно"
-        else
-            echo "  froggy ($FROGGY_MODEL) — freeze/thaw + forced pageout фоновых app"
-        fi
+        case "$SESSION" in
+            lmstudio) echo "  lmstudio ($LMSTUDIO_MODEL) — llama.cpp, macOS управляет памятью стандартно" ;;
+            ollama)   echo "  ollama ($OLLAMA_MODEL) — macOS управляет памятью стандартно" ;;
+            froggy)   echo "  froggy ($FROGGY_MODEL) — MLX, freeze/thaw + forced pageout фоновых app" ;;
+        esac
         echo ""
         echo "ПАМЯТЬ (средние за сессию)"
         python3 - "$METRICS_CSV" <<'PYEOF'
@@ -343,6 +402,10 @@ PYEOF
 
 # ── Main ───────────────────────────────────────────────────────────────────────
 main() {
+    [[ "$SESSION" == "froggy" ]] && \
+        log "Убедись: Froggy запущен с моделью $FROGGY_MODEL (froggy load ~/models/$FROGGY_MODEL)"
+    [[ "$SESSION" == "lmstudio" ]] && \
+        log "Убедись: LM Studio → Local Server → Start Server, модель загружена"
     log "=== Benchmark: $SESSION | $(date) ==="
     log "Длительность: $((DURATION_SEC/60)) мин | Метрики: ${METRICS_INTERVAL}с | Промпты: $((PROMPT_INTERVAL/60)) мин"
     $POWER_MODE && log "Power mode: ON (powermetrics активен)"
