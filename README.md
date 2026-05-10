@@ -39,7 +39,9 @@ Claude Code  ←— stdio / MCP (JSON-RPC) —→  froggy-mcp  ←— Unix socke
 
 Once `froggy-mcp` is registered, the cloud model can ask *"what's open on your screen right now?"*
 or *"summarise the last call"* — and Froggy answers from its local context without you copying
-anything. Heavy reasoning stays in the cloud; sensitive data never leaves the Mac.
+anything. Heavy reasoning stays in the cloud; screen and transcript content travels to the cloud
+model on each tool call, with credentials stripped by `Redactor` beforehand. See
+[ADR-0016](docs/adr/0016-froggy-mcp-cloud-routing-privacy.md) for the exact data-flow audit.
 
 ## Features
 

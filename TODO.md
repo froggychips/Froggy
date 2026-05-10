@@ -166,6 +166,17 @@ benchmark без живого FroggyDaemon + загруженной модели
 frontmost-приложений. Делается пользователем после merge всех Mem-серии,
 до того как браться за overlay (Mem-5 этап 2) или Уровень 2.
 
+## froggy-mcp — известные gap'ы (ADR-0016)
+
+**Per-tool ACL** — сегодня регистрация froggy-mcp открывает все четыре инструмента
+(`froggy_context`, `froggy_generate`, `froggy_transcripts`, `froggy_status`) единым
+opt-in. Пользователь не может запретить только `froggy_transcripts` не убирая весь MCP.
+Транскрипты — повышенная чувствительность (речь, не текст), нужен отдельный enable/disable.
+Реализация: либо конфиг-флаг в froggy-mcp, либо отдельный IPC-capability check в демоне.
+Не блокер, но gap зафиксирован в ADR-0016 и требует решения до v1.0.
+
+---
+
 ## Trust Governance — следующий шаг после AD-1 + FCP-1 + EXP-1 (не Уровень 2)
 
 После того как AD-1 / FCP-1 / EXP-1 смерджены — **не открывать Уровень 2**
