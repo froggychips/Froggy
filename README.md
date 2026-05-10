@@ -31,10 +31,13 @@ daemon, so you can drive it from any language.
 | Companion | What it adds |
 |---|---|
 | [froggy-mcp](https://github.com/froggychips/froggy-mcp) | MCP server — gives Claude Code four tools to query Froggy directly over its Unix socket (screen context, local LLM, meeting transcripts, daemon status). No copy-paste. |
+| [froggy-sre](https://github.com/froggychips/froggy-sre) | SRE incident response agent — feeds Kubernetes alerts through a 5-stage pipeline (analyze → hypothesize → critique → fix → risk). Routes LLM calls to Froggy first, falls back to Anthropic API. |
 
 ```
 Claude Code  ←— stdio / MCP (JSON-RPC) —→  froggy-mcp  ←— Unix socket / JSON-line —→  Froggy daemon
                  (cloud, powerful)                            (local, private, eyes-on)
+
+Claude Code  ←— stdio / MCP (JSON-RPC) —→  froggy-sre  ←— socket (primary) / HTTPS (fallback) —→  Froggy / Anthropic
 ```
 
 Once `froggy-mcp` is registered, the cloud model can ask *"what's open on your screen right now?"*
