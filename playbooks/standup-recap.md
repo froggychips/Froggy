@@ -11,7 +11,7 @@ No copy-paste. No manual notes.
 
 - [Froggy daemon](https://github.com/froggychips/froggy) running with `froggy-mcp` registered in Claude Code
 - [Atlassian MCP](https://github.com/anthropics/anthropic-tools-atlassian) configured for your Jira workspace
-- Active or recently ended Froggy audio session (transcript must exist)
+- Active or recently ended Froggy audio session with content (check `froggy_status` → `segmentsTotal > 0`; if transcript is empty the playbook will stop at step 1)
 
 ## Installation
 
@@ -103,6 +103,18 @@ Return a markdown table:
 | WO-XXXX | [Jira summary] | [1-line what was said] | ✓ / ✗ / dry-run |
 
 End with total: "N tickets found, M comments posted."
+
+### 9. Write-back to Froggy context
+
+Call `froggy_inject` with a one-line summary of the session:
+
+```
+[standup-recap 2026-05-10] WO-XXXX: decided X. WO-YYYY: blocked on Z. Comments posted.
+```
+
+This makes the decision visible to future Froggy context captures — the next time you ask about screen context, Froggy already knows what was resolved in the standup.
+
+Skip this step if `--no-jira` or if `froggy_inject` is unavailable.
 
 ## Error handling
 

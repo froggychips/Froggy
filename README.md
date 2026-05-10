@@ -2,14 +2,14 @@
 
 🌐 **English** · [Русский](README.ru.md)
 
-> **Local LLM with screen-context awareness for Apple Silicon Macs — designed from the ground up for 8 GB unified memory.**
+> **Local LLM with screen-context awareness for Apple Silicon Macs. Built for 8 GB unified memory — useful whenever LLM inference competes with other apps for RAM.**
 
 Most local-LLM tools assume you have 16+ GB RAM. Froggy doesn't. It runs a
 small MLX model alongside aggressive unified-memory management — freezing
 background apps under real memory pressure (`SIGSTOP` + forced pageout),
 isolating MLX inference in a child process so unloading actually returns
 RAM to the kernel — so a 3–4 B model can coexist with your daily workflow
-on entry-level Apple Silicon.
+on 8 GB Apple Silicon, and larger models (13 B+) can coexist on 16 GB.
 
 It also captures your screen via `ScreenCaptureKit`, runs Vision OCR with
 secret redaction **before** anything hits disk, and feeds that as context

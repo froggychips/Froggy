@@ -13,9 +13,10 @@ out of scope.
 ## What Froggy is
 
 - A **research-grade scaffold** for running local MLX models on
-  memory-constrained Apple Silicon Macs — specifically targeting **8 GB
-  unified memory**, the configuration most existing local-LLM tools
-  ignore.
+  memory-constrained Apple Silicon Macs. Built specifically for **8 GB
+  unified memory**, but equally relevant whenever local LLM inference
+  competes with other apps for RAM — including 16 GB+ machines running
+  13 B+ models alongside a full dev environment.
 - A **working example of native macOS resource management**:
   `ScreenCaptureKit` capture, Vision OCR, reactive memory-pressure
   handling, `SIGSTOP` + forced pageout for background apps, MLX
@@ -74,7 +75,8 @@ out of scope.
 Roughly, in descending order of fit:
 
 - People with **8 GB Apple Silicon Macs** who want to run small local
-  LLMs without the machine grinding to a halt.
+  LLMs without the machine grinding to a halt — and anyone on 16 GB+
+  running larger models (13 B+) alongside a full dev environment.
 - **Privacy-conscious developers** who can't (or won't) send screen
   contents to cloud APIs — corporate code under NDA, legal/medical
   contexts, security research.
