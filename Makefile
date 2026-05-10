@@ -3,7 +3,7 @@
 # Без этого pre-build шага FroggyMLXWorker не может загрузить
 # ни одной MLX-модели в release-сборке через SwiftPM.
 
-.PHONY: build build-debug release smoke test full resolve metallib logbundle session-summary clean help
+.PHONY: build build-debug release smoke test full resolve metallib logbundle session-summary release-tag clean help
 
 # Default target: release build.
 build: release
@@ -65,6 +65,10 @@ logbundle:
 session-summary:
 	scripts/session-summary.sh
 
+release-tag:
+	@test -n "$(VERSION)" || { echo "Usage: make release-tag VERSION=x.y.z"; exit 1; }
+	scripts/release.sh "$(VERSION)"
+
 clean:
 	swift package clean
 	rm -rf .build/metallib-work
@@ -79,4 +83,5 @@ help:
 	@echo "make metallib      — только пересобрать default.metallib"
 	@echo "make logbundle     — собрать froggy.logarchive для bug-report'а"
 	@echo "make session-summary — собрать session-bundle (log+SQLite+state+IPC+notes)"
+	@echo "make release-tag VERSION=x.y.z — тегировать и пушить; CI собирёт и создаст Release"
 	@echo "make clean         — clean всё, включая metallib"

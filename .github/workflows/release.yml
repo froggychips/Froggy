@@ -1,0 +1,81 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+# Не отменять in-progress релиз — он уже пишет артефакт.
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: Build & publish release
+    runs-on: [self-hosted, macOS, ARM64]
+    timeout-minutes: 60
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          clean: false
+
+      - name: Verify runner
+        run: |
+          test "$(uname -m)" = "arm64" || { echo "Not ARM64: $(uname -m)"; exit 1; }
+          major=$(sw_vers -productVersion | cut -d. -f1)
+          test "$major" -ge 14 || { echo "macOS < 14: $(sw_vers -productVersion)"; exit 1; }
+          sw_vers
+
+      - name: Show toolchain
+        run: swift --version
+
+      - name: Build (release + metallib)
+        run: make release
+
+      - name: Smoke test
+        run: make smoke
+
+      - name: Ad-hoc codesign
+        run: |
+          for bin in FroggyDaemon FroggyMenuBar FroggyMLXWorker froggy; do
+            path=".build/release/$bin"
+            if [ -f "$path" ]; then
+              codesign --force --sign - "$path"
+              echo "signed: $bin"
+            fi
+          done
+
+      - name: Package zip
+        run: |
+          VERSION="${{ github.ref_name }}"
+          DIST="froggy-${VERSION}-arm64"
+          mkdir -p "$DIST/Resources" "$DIST/LaunchAgent" "$DIST/playbooks"
+
+          for bin in FroggyDaemon FroggyMenuBar FroggyMLXWorker froggy; do
+            path=".build/release/$bin"
+            [ -f "$path" ] && cp "$path" "$DIST/"
+          done
+
+          cp .build/release/Resources/default.metallib "$DIST/Resources/"
+          cp packaging/com.froggychips.froggy.plist   "$DIST/LaunchAgent/"
+          cp packaging/Froggy.entitlements             "$DIST/LaunchAgent/"
+          cp packaging/README.md                       "$DIST/LaunchAgent/"
+          cp playbooks/*.md                            "$DIST/playbooks/"
+
+          zip -r "${DIST}.zip" "$DIST"
+          echo "ASSET=${DIST}.zip" >> "$GITHUB_ENV"
+          ls -lh "${DIST}.zip"
+
+      - name: Create GitHub Release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create "${{ github.ref_name }}" \
+            --title "Froggy ${{ github.ref_name }}" \
+            --generate-notes \
+            "${{ env.ASSET }}"
