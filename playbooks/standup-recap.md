@@ -70,13 +70,31 @@ Status at time of meeting: [current status from Jira]
 _Posted automatically via Froggy + Claude Code_
 ```
 
-If `--dry-run` or `--no-jira` flag is set, **skip this step** and show the comment text inline instead.
+### 6. Preview and approval
 
-### 6. Post to Jira
+**Always required before posting — even without --dry-run.**
 
-For each ticket, call `addCommentToJiraIssue` with the composed comment body. Record success/failure.
+Show a preview block for each ticket:
 
-### 7. Output summary table
+```
+--- WO-XXXX: [Jira summary] ---
+[full comment text that will be posted]
+
+--- WO-YYYY: [Jira summary] ---
+[full comment text that will be posted]
+```
+
+Then ask: **"Post these N comments to Jira? Reply `yes` to post all, `no` to cancel, or list ticket IDs to post selectively (e.g. `WO-11193 WO-11205`)."**
+
+Wait for the user's reply. If the reply is `no` or anything other than `yes` / a list of IDs — stop, do not call `addCommentToJiraIssue`.
+
+If `--dry-run` or `--no-jira` flag is set, skip to step 7 without asking.
+
+### 7. Post to Jira
+
+Post only to tickets approved in step 6. For each, call `addCommentToJiraIssue`. Record success/failure.
+
+### 8. Output summary table
 
 Return a markdown table:
 
