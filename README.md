@@ -22,7 +22,7 @@ daemon, so you can drive it from any language.
 **Status:** working personal-use scaffolding. Not a product. See
 [`docs/POSITIONING.md`](docs/POSITIONING.md) for what this is and isn't.
 
-📖 [THESIS](docs/THESIS.md) · [POSITIONING](docs/POSITIONING.md) · [FAQ](docs/FAQ.md) · [ADRs](docs/adr/) · [Ecosystem](docs/ECOSYSTEM.md) · [Packaging](packaging/README.md)
+📖 [THESIS](docs/THESIS.md) · [POSITIONING](docs/POSITIONING.md) · [FAQ](docs/FAQ.md) · [ADRs](docs/adr/) · [Plugin guide](docs/PLUGIN_GUIDE.md) · [Ecosystem](docs/ECOSYSTEM.md) · [Packaging](packaging/README.md)
 📬 Contact: [@froggychips](https://t.me/froggychips) on Telegram
 📜 License: [MIT](LICENSE)
 
