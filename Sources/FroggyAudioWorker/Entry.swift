@@ -16,7 +16,7 @@ import os
 struct FroggyAudioWorker {
     static func main() {
         let log = Logger(subsystem: "com.froggychips.froggy.audio", category: "worker")
-        log.notice("audio worker started pid=\(getpid())")
+        log.notice("audio worker started pid=\(getpid()) wireVersion=\(AudioWireVersion.current)")
 
         let cli = CLIFlags.parse(CommandLine.arguments)
         let runtime = AudioRuntime(log: log, defaultDiscordPid: cli.discordPid)

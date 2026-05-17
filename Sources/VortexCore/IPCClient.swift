@@ -1,5 +1,21 @@
 import Darwin
 import Foundation
+import os
+
+/// Issue #57: once-per-version warning о IPC mismatch со стороны клиента
+/// (например MenuBar полез к старому daemon-у). Глобальная статика — у нас
+/// один процесс на клиент, нет необходимости в per-instance флаге.
+private final class IPCClientMismatchTracker: @unchecked Sendable {
+    static let shared = IPCClientMismatchTracker()
+    private let lock = NSLock()
+    private var logged: Set<Int> = []
+    func shouldLog(receivedVersion: Int) -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        return logged.insert(receivedVersion).inserted
+    }
+}
+
+private let ipcClientLog = Logger(subsystem: "com.froggychips.froggy", category: "ipc-client")
 
 public enum IPCClientError: Error, Sendable, CustomStringConvertible {
     case socketCreation(Int32)
@@ -299,6 +315,13 @@ public actor IPCClient {
                     response = try JSONDecoder().decode(IPCResponse.self, from: line)
                 } catch {
                     throw IPCClientError.decode(String(describing: error))
+                }
+                // Issue #57: предупреждение об отставшем daemon-е. Once-per-version.
+                if let v = response.apiVersion, v != IPCWireVersion.current,
+                   IPCClientMismatchTracker.shared.shouldLog(receivedVersion: v) {
+                    ipcClientLog.warning(
+                        "IPC wire version mismatch: daemon=\(v, privacy: .public) client=\(IPCWireVersion.current, privacy: .public)"
+                    )
                 }
                 let stop = onResponse(response)
                 if stop { return }

@@ -1,5 +1,11 @@
 import Foundation
 
+/// Wire-protocol версия для daemon↔FroggyAudioWorker (issue #57, ADR-0003).
+/// См. `MLXWireVersion` — те же правила bump'а и обработки.
+public enum AudioWireVersion {
+    public static let current: Int = 1
+}
+
 /// Команда от демона к FroggyAudioWorker. Одна JSON-строка на stdin.
 public struct AudioWorkerCommand: Codable, Sendable {
     public var cmd: String
@@ -18,6 +24,8 @@ public struct AudioWorkerCommand: Codable, Sendable {
     public var vadEnabled: Bool?
     /// Порог RMS для VAD (0.008 ≈ -42 dBFS).
     public var vadRmsThreshold: Double?
+    /// См. `AudioWireVersion`. Опциональное для backwards-compat.
+    public var apiVersion: Int?
 
     public init(
         cmd: String,
@@ -28,7 +36,8 @@ public struct AudioWorkerCommand: Codable, Sendable {
         echoSuppression: Bool? = nil,
         echoSuppressionTailMs: Int? = nil,
         vadEnabled: Bool? = nil,
-        vadRmsThreshold: Double? = nil
+        vadRmsThreshold: Double? = nil,
+        apiVersion: Int? = AudioWireVersion.current
     ) {
         self.cmd = cmd
         self.discordPid = discordPid
@@ -39,6 +48,7 @@ public struct AudioWorkerCommand: Codable, Sendable {
         self.echoSuppressionTailMs = echoSuppressionTailMs
         self.vadEnabled = vadEnabled
         self.vadRmsThreshold = vadRmsThreshold
+        self.apiVersion = apiVersion
     }
 
     public static let startCapture = "startCapture"
@@ -59,6 +69,8 @@ public struct AudioWorkerEvent: Codable, Sendable {
     public var speaker: String?
     /// Сообщение об ошибке (для event = "error").
     public var message: String?
+    /// См. `AudioWireVersion`. Опциональное; legacy worker'ы шлют nil.
+    public var apiVersion: Int?
 
     public init(
         event: String,
@@ -66,7 +78,8 @@ public struct AudioWorkerEvent: Codable, Sendable {
         text: String? = nil,
         isFinal: Bool? = nil,
         speaker: String? = nil,
-        message: String? = nil
+        message: String? = nil,
+        apiVersion: Int? = AudioWireVersion.current
     ) {
         self.event = event
         self.requestId = requestId
@@ -74,6 +87,7 @@ public struct AudioWorkerEvent: Codable, Sendable {
         self.isFinal = isFinal
         self.speaker = speaker
         self.message = message
+        self.apiVersion = apiVersion
     }
 
     public static let ready      = "ready"

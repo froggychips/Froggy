@@ -1,5 +1,13 @@
 import Foundation
 
+/// Wire-protocol версия для IPC между daemon-ом и клиентами (issue #57, ADR-0003).
+/// См. `MLXWireVersion` — те же правила. Mismatch определяется на стороне
+/// `DaemonIPCHandler` (от старого клиента) и `IPCClient` (от старого daemon-а)
+/// и логируется как warning один раз на сессию.
+public enum IPCWireVersion {
+    public static let current: Int = 1
+}
+
 public struct IPCRequest: Codable, Sendable {
     public var cmd: String
     public var prompt: String?
@@ -16,6 +24,8 @@ public struct IPCRequest: Codable, Sendable {
     public var discordPid: Int32?
     /// Универсальный Bool-параметр (используется в `setFreezingEnabled`).
     public var enabled: Bool?
+    /// См. `IPCWireVersion`. Опциональное для backwards-compat.
+    public var apiVersion: Int?
 
     public init(
         cmd: String,
@@ -28,7 +38,8 @@ public struct IPCRequest: Codable, Sendable {
         useContext: Bool? = nil,
         experimental: Bool? = nil,
         discordPid: Int32? = nil,
-        enabled: Bool? = nil
+        enabled: Bool? = nil,
+        apiVersion: Int? = IPCWireVersion.current
     ) {
         self.cmd = cmd
         self.prompt = prompt
@@ -41,6 +52,7 @@ public struct IPCRequest: Codable, Sendable {
         self.experimental = experimental
         self.discordPid = discordPid
         self.enabled = enabled
+        self.apiVersion = apiVersion
     }
 }
 
@@ -96,8 +108,13 @@ public struct IPCResponse: Codable, Sendable {
     /// Master switch freeze-логики (ADR 0017). Возвращается в `status`,
     /// принимается в `setFreezingEnabled`.
     public var freezingEnabled: Bool?
+    /// См. `IPCWireVersion`. Опциональное; legacy daemon'ы шлют nil.
+    public var apiVersion: Int?
 
-    public init() {}
+    public init() {
+        // Producer-side default — каждый response уезжает с current.
+        self.apiVersion = IPCWireVersion.current
+    }
 
     public static func failure(_ message: String) -> IPCResponse {
         var r = IPCResponse()

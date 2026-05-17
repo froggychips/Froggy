@@ -1,5 +1,15 @@
 import Foundation
 
+/// Wire-protocol версия для daemon↔FroggyMLXWorker (issue #57, ADR-0003).
+/// Bump при breaking-изменении формата команд или событий. Не bump'ить
+/// при добавлении опциональных полей — Codable forward-compat покрывает их
+/// сам через `decodeIfPresent`. Mismatch определяется на consumer-стороне
+/// (`MLXSupervisor`) и логируется как warning, не fatal — для сценария
+/// «новый daemon + старый ручной worker через `mlxWorkerPath`».
+public enum MLXWireVersion {
+    public static let current: Int = 1
+}
+
 /// Команда от демона к `FroggyMLXWorker`. Одна JSON-строка на stdin.
 public struct MLXWorkerCommand: Codable, Sendable {
     public var cmd: String
@@ -12,6 +22,10 @@ public struct MLXWorkerCommand: Codable, Sendable {
     /// дефолт worker'a.
     public var kvBits: Int?
     public var requestId: String?
+    /// См. `MLXWireVersion`. Опциональный для backwards-compat: старые
+    /// клиенты без поля декодятся (через `decodeIfPresent` в Codable),
+    /// новые при создании получают `current` по дефолту.
+    public var apiVersion: Int?
 
     public init(
         cmd: String,
@@ -20,7 +34,8 @@ public struct MLXWorkerCommand: Codable, Sendable {
         maxTokens: Int? = nil,
         temperature: Double? = nil,
         kvBits: Int? = nil,
-        requestId: String? = nil
+        requestId: String? = nil,
+        apiVersion: Int? = MLXWireVersion.current
     ) {
         self.cmd = cmd
         self.path = path
@@ -29,6 +44,7 @@ public struct MLXWorkerCommand: Codable, Sendable {
         self.temperature = temperature
         self.kvBits = kvBits
         self.requestId = requestId
+        self.apiVersion = apiVersion
     }
 
     public static let load = "load"
@@ -52,6 +68,8 @@ public struct MLXWorkerEvent: Codable, Sendable {
     public var decodeTPS: Double?
     public var promptTokens: Int?
     public var generatedTokens: Int?
+    /// См. `MLXWireVersion`. Опциональное; legacy worker'ы шлют nil.
+    public var apiVersion: Int?
 
     public init(
         event: String,
@@ -62,7 +80,8 @@ public struct MLXWorkerEvent: Codable, Sendable {
         promptTPS: Double? = nil,
         decodeTPS: Double? = nil,
         promptTokens: Int? = nil,
-        generatedTokens: Int? = nil
+        generatedTokens: Int? = nil,
+        apiVersion: Int? = MLXWireVersion.current
     ) {
         self.event = event
         self.requestId = requestId
@@ -73,6 +92,7 @@ public struct MLXWorkerEvent: Codable, Sendable {
         self.decodeTPS = decodeTPS
         self.promptTokens = promptTokens
         self.generatedTokens = generatedTokens
+        self.apiVersion = apiVersion
     }
 
     public static let ready = "ready"

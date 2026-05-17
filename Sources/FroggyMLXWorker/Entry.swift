@@ -16,7 +16,7 @@ import os
 struct FroggyMLXWorker {
     static func main() async {
         let log = Logger(subsystem: "com.froggychips.froggy.worker", category: "worker")
-        log.notice("worker started pid=\(getpid())")
+        log.notice("worker started pid=\(getpid()) wireVersion=\(MLXWireVersion.current)")
 
         let cli = CLIFlags.parse(CommandLine.arguments)
         let runtime = WorkerRuntime(log: log, defaultKVBits: cli.kvBits)

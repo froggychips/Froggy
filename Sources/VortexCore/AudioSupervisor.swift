@@ -41,6 +41,8 @@ public actor AudioSupervisor {
     private var capturing = false
     private var sessionStore: SessionStore?
     private var lastSessionURL: URL?
+    /// Issue #57: once-per-spawn wire-version warning (см. MLXSupervisor).
+    private var wireVersionMismatchLogged = false
 
     public init(workerExecutableURL: URL? = nil) {
         self.workerURL = workerExecutableURL ?? Self.defaultWorkerURL()
@@ -207,6 +209,12 @@ public actor AudioSupervisor {
     }
 
     private func deliverEvent(_ event: AudioWorkerEvent) {
+        if let v = event.apiVersion, v != AudioWireVersion.current, !wireVersionMismatchLogged {
+            Self.log.warning(
+                "audio wire version mismatch: worker=\(v, privacy: .public) daemon=\(AudioWireVersion.current, privacy: .public) — продолжаем, но проверь audioWorkerPath"
+            )
+            wireVersionMismatchLogged = true
+        }
         switch event.event {
         case AudioWorkerEvent.ready:
             if let id = event.requestId, let cont = pendingRequests.removeValue(forKey: id) {
@@ -261,6 +269,8 @@ public actor AudioSupervisor {
         stdinHandle = nil
         process = nil
         capturing = false
+        // Issue #57: следующий spawn — другой бинарь, другой мог отстать.
+        wireVersionMismatchLogged = false
         if let store = sessionStore {
             Task { await store.close() }
             sessionStore = nil

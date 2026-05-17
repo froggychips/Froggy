@@ -1,8 +1,10 @@
+import AudioWorkerProtocol
 import Darwin
 import Dispatch
 import Foundation
 import LushaBridge
 import LushaExperimental
+import MLXWorkerProtocol
 import VortexCore
 import os
 
@@ -12,6 +14,12 @@ private let log = Logger(subsystem: "com.froggychips.froggy", category: "daemon"
 struct FroggyDaemon {
     static func main() async {
         log.info("🐸 Froggy Daemon v0.4.0 starting")
+        // Issue #57: явный лог wire-version constants. При расследовании
+        // «почему daemon не понимает worker» — здесь сразу видно ожидаемые
+        // числа, чтобы сравнить с тем что worker напишет в свой лог на старте.
+        log.info(
+            "wire api versions: mlx=\(MLXWireVersion.current, privacy: .public) audio=\(AudioWireVersion.current, privacy: .public) ipc=\(IPCWireVersion.current, privacy: .public)"
+        )
 
         // SIGPIPE → SIG_IGN. IPC writes на закрытый client socket (клиент
         // crash'нулся посреди streaming response'а) иначе шлют SIGPIPE и
@@ -270,6 +278,18 @@ private final class SignalKeeper: @unchecked Sendable {
 
 // MARK: - IPC handler
 
+/// Issue #57: глобальный once-flag для warning'а про IPC wire-version. Sendable
+/// requires класс / actor; ставим class с lock. Простая видимость, не race-critical.
+private final class IPCMismatchTracker: @unchecked Sendable {
+    static let shared = IPCMismatchTracker()
+    private let lock = NSLock()
+    private var logged: Set<Int> = []
+    func shouldLog(receivedVersion: Int) -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        return logged.insert(receivedVersion).inserted
+    }
+}
+
 struct DaemonIPCHandler: IPCRequestHandler, Sendable {
     let coordinator: VortexCoordinator
     let vortex: VortexActor
@@ -303,6 +323,15 @@ struct DaemonIPCHandler: IPCRequestHandler, Sendable {
     }
 
     func handle(_ request: IPCRequest) async -> IPCResponse {
+        // Issue #57: предупреждение об IPC wire-version mismatch. Не fatal —
+        // request всё равно обработаем; пометим, что клиент возможно отстал.
+        // Once-per-version (не per-request), иначе логи захлебнутся.
+        if let v = request.apiVersion, v != IPCWireVersion.current,
+           IPCMismatchTracker.shared.shouldLog(receivedVersion: v) {
+            log.warning(
+                "IPC wire version mismatch: client=\(v, privacy: .public) daemon=\(IPCWireVersion.current, privacy: .public) cmd=\(request.cmd, privacy: .public)"
+            )
+        }
         switch request.cmd {
         case "status":
             var r = IPCResponse()

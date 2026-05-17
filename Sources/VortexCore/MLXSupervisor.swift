@@ -57,6 +57,10 @@ public actor MLXSupervisor {
     private var loadedPath: String?
     private var stdoutBuffer = Data()
     private var pendingRequests: [String: AsyncThrowingStream<MLXWorkerEvent, any Error>.Continuation] = [:]
+    /// Issue #57: warning о версии wire-протокола логируется один раз на
+    /// жизнь supervisor'а (т.е. одно лог-сообщение на spawn worker'а),
+    /// чтобы не флудить лог per-event. Reset'ится при handleWorkerExit.
+    private var wireVersionMismatchLogged = false
 
     public init(
         memoryLimitBytes: Int? = nil,
@@ -404,6 +408,15 @@ public actor MLXSupervisor {
     }
 
     private func deliverEvent(_ event: MLXWorkerEvent) {
+        // Issue #57: проверка wire-version. Worker без поля (legacy) → silent;
+        // worker с другим current → warning один раз. Не fatal — может быть
+        // ручная подмена `mlxWorkerPath` на чуть отстающий бинарь.
+        if let v = event.apiVersion, v != MLXWireVersion.current, !wireVersionMismatchLogged {
+            Self.log.warning(
+                "MLX wire version mismatch: worker=\(v, privacy: .public) daemon=\(MLXWireVersion.current, privacy: .public) — продолжаем, но проверь mlxWorkerPath"
+            )
+            wireVersionMismatchLogged = true
+        }
         guard let id = event.requestId, let cont = pendingRequests[id] else { return }
         cont.yield(event)
         switch event.event {
@@ -420,6 +433,9 @@ public actor MLXSupervisor {
     }
 
     private func handleWorkerExit(pid: Int32, status: Int32) async {
+        // Issue #57: новый worker может иметь другую wire-version. Сбрасываем
+        // флаг, чтобы первый mismatch на следующем spawn'е снова залогировался.
+        wireVersionMismatchLogged = false
         // Race-guard: terminationHandler от старого процесса может прийти
         // ПОСЛЕ того, как `unloadModel` уже сделал cleanup и `loadModel`
         // успел spawn'нуть новый worker. В этом случае `process?.processIdentifier`
