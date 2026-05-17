@@ -13,7 +13,7 @@ private let log = Logger(subsystem: "com.froggychips.froggy", category: "daemon"
 @main
 struct FroggyDaemon {
     static func main() async {
-        log.info("🐸 Froggy Daemon v0.5.0 starting")
+        log.info("🐸 Froggy Daemon v0.5.1 starting")
         // Issue #57: явный лог wire-version constants. При расследовании
         // «почему daemon не понимает worker» — здесь сразу видно ожидаемые
         // числа, чтобы сравнить с тем что worker напишет в свой лог на старте.
