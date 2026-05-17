@@ -119,13 +119,19 @@ struct FroggyDaemon {
             scorer: scorer,
             dedupThreshold: config.contextDedupThreshold
         )
+        // Issue #61: skip-list = defaults + config.ocrSkipPatterns + user-file.
+        let ocrSkipList = OCRSkipList.loadDefaults(
+            configPatterns: config.ocrSkipPatterns,
+            userPatternsFile: OCRSkipList.defaultUserPatternsURL
+        )
         let vision = VisionActor(
             captureInterval: .seconds(config.captureIntervalSeconds),
             redactor: Redactor(),
             contextStore: contextStore,
             frameSimilarityThreshold: config.frameSimilarityThreshold,
             warningMultiplier: config.framePacerWarningMultiplier,
-            criticalMultiplier: config.framePacerCriticalMultiplier
+            criticalMultiplier: config.framePacerCriticalMultiplier,
+            skipList: ocrSkipList
         )
 
         let coordinator = VortexCoordinator(

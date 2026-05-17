@@ -36,6 +36,11 @@ public actor VisionActor {
     /// `currentInterval`, которое = base × pressure multiplier (issue #59).
     private let captureInterval: Duration
     private let redactor: Redactor
+    /// Issue #61: regex skip-list для шумных OCR-строк (часы, проценты,
+    /// progress widgets). Применяется ПЕРЕД redactor — не тратим время на
+    /// дорогой regex-scan секретов в строках, которые сейчас выкинем.
+    /// nil = skip-list выключен (тесты без patterns).
+    private let skipList: OCRSkipList?
     private let contextStore: ContextStore?
     private let frameSimilarityThreshold: Double
     private let screenStream: ScreenStream
@@ -62,13 +67,15 @@ public actor VisionActor {
         frameSimilarityThreshold: Double = 0.98,
         screenStream: ScreenStream = ScreenStream(),
         warningMultiplier: Double = 2.0,
-        criticalMultiplier: Double = 4.0
+        criticalMultiplier: Double = 4.0,
+        skipList: OCRSkipList? = nil
     ) {
         self.captureInterval = captureInterval
         self.redactor = redactor
         self.contextStore = contextStore
         self.frameSimilarityThreshold = frameSimilarityThreshold
         self.screenStream = screenStream
+        self.skipList = skipList
         // Multipliers ниже 1.0 не имеют смысла (это бы УСКОРЯЛО OCR на
         // pressure), clamp'им в [1.0, ∞). Issue #59 acceptance: «никогда
         // не падает ниже configured min» гарантировано этим clamp'ом.
@@ -265,7 +272,10 @@ public actor VisionActor {
         }
 
         let strings = await Self.recognizeText(image: image)
-        let redacted = redactor.redact(strings)
+        // Issue #61: skip-list ПЕРЕД redactor — не платим за regex-scan
+        // секретов в строках, которые сейчас отбросим (часы, %, file sizes).
+        let kept = skipList?.filter(strings) ?? strings
+        let redacted = redactor.redact(kept)
         ocrChars = redacted.reduce(0) { $0 + $1.count }
 
         // Issue #60: semantic OCR-diff поверх pixel digest'а. Pixel меняется
@@ -294,12 +304,13 @@ public actor VisionActor {
         return trimmed.sorted().joined(separator: "\n")
     }
 
-    /// Тестовый seam для #60: прогоняет post-OCR pipeline (redact + semantic
-    /// dedup + push) на готовом массиве строк. Возвращает true если push
-    /// произошёл, false если skipped. Без реального SCStream и Vision.
+    /// Тестовый seam для #60/#61: прогоняет post-OCR pipeline
+    /// (skip-list filter + redact + semantic dedup + push). Возвращает true
+    /// если push произошёл, false если skipped.
     @discardableResult
     func _testProcessOCRResult(_ strings: [String]) async -> Bool {
-        let redacted = redactor.redact(strings)
+        let kept = skipList?.filter(strings) ?? strings
+        let redacted = redactor.redact(kept)
         let normalized = Self.normalizeForSemanticDiff(redacted)
         if !normalized.isEmpty, normalized == lastOCRNormalized {
             return false

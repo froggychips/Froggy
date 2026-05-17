@@ -86,6 +86,15 @@ public struct FroggyConfig: Codable, Sendable, Equatable {
     /// которая всё ещё иногда даёт snapshot.
     public var framePacerCriticalMultiplier: Double
 
+    /// Issue #61: regex-список для skip'а шумных OCR-строк (часы, проценты,
+    /// file sizes). Применяется per-line поверх `defaultPatterns`. nil →
+    /// только defaults; пустой массив — тоже только defaults (если хочется
+    /// явно «не добавлять кастом», просто пропусти поле). Невалидные regex'ы
+    /// логируются warning'ом и игнорятся, daemon не падает.
+    /// User-specific list — отдельным файлом `ocr-skip-patterns.json` в
+    /// support directory; см. `OCRSkipList.defaultUserPatternsURL`.
+    public var ocrSkipPatterns: [String]?
+
     public var ipcSocketPath: String
     public var frameSimilarityThreshold: Double
     public var contextWindowSize: Int
@@ -125,6 +134,7 @@ public struct FroggyConfig: Codable, Sendable, Equatable {
         freezingEnabled: Bool = true,
         framePacerWarningMultiplier: Double = 2.0,
         framePacerCriticalMultiplier: Double = 4.0,
+        ocrSkipPatterns: [String]? = nil,
         ipcSocketPath: String = FroggyConfig.defaultSocketPath,
         frameSimilarityThreshold: Double = 0.98,
         contextWindowSize: Int = 30,
@@ -156,6 +166,7 @@ public struct FroggyConfig: Codable, Sendable, Equatable {
         self.freezingEnabled = freezingEnabled
         self.framePacerWarningMultiplier = framePacerWarningMultiplier
         self.framePacerCriticalMultiplier = framePacerCriticalMultiplier
+        self.ocrSkipPatterns = ocrSkipPatterns
         self.ipcSocketPath = ipcSocketPath
         self.frameSimilarityThreshold = frameSimilarityThreshold
         self.contextWindowSize = contextWindowSize
@@ -228,6 +239,7 @@ public struct FroggyConfig: Codable, Sendable, Equatable {
         self.freezingEnabled = try c.decodeIfPresent(Bool.self, forKey: .freezingEnabled) ?? d.freezingEnabled
         self.framePacerWarningMultiplier = try c.decodeIfPresent(Double.self, forKey: .framePacerWarningMultiplier) ?? d.framePacerWarningMultiplier
         self.framePacerCriticalMultiplier = try c.decodeIfPresent(Double.self, forKey: .framePacerCriticalMultiplier) ?? d.framePacerCriticalMultiplier
+        self.ocrSkipPatterns = try c.decodeIfPresent([String].self, forKey: .ocrSkipPatterns)
 
         self.ipcSocketPath = try c.decodeIfPresent(String.self, forKey: .ipcSocketPath) ?? d.ipcSocketPath
         self.frameSimilarityThreshold = try c.decodeIfPresent(Double.self, forKey: .frameSimilarityThreshold) ?? d.frameSimilarityThreshold
