@@ -68,6 +68,13 @@ public actor VortexCoordinator: WorkspaceTerminationWatcher.Sink {
     /// в этом состоянии veto не применяется (и так морозим что хотим).
     private var frontmostPid: Int32?
 
+    /// Master switch (ADR 0017). false → `applyPolicy` и `applyWorkspaceEvent`
+    /// игнорят pressure-сигналы и app-activations. Daemon продолжает крутиться
+    /// (ContextStore, vision, IPC), но не SIGSTOP-ит ничего самостоятельно.
+    /// Меняется только через `setFreezingEnabled`. MenuBar Off → false + unload
+    /// + thawAll, чтобы daemon уехал в idle ~50 MB без замороженных pid'ов.
+    private var freezingEnabled: Bool
+
     public init(
         mlx: MLXSupervisor,
         vortex: any VortexFreezing,
@@ -84,7 +91,8 @@ public actor VortexCoordinator: WorkspaceTerminationWatcher.Sink {
         echoSuppressionEnabled: Bool = true,
         echoSuppressionTailMs: Int = 400,
         vadEnabled: Bool = true,
-        vadRmsThreshold: Double = 0.008
+        vadRmsThreshold: Double = 0.008,
+        freezingEnabled: Bool = true
     ) {
         self.mlx = mlx
         self.vortex = vortex
@@ -102,6 +110,7 @@ public actor VortexCoordinator: WorkspaceTerminationWatcher.Sink {
         self.echoSuppressionTailMs = echoSuppressionTailMs
         self.vadEnabled = vadEnabled
         self.vadRmsThreshold = vadRmsThreshold
+        self.freezingEnabled = freezingEnabled
     }
 
     // MARK: - Lifecycle
@@ -170,6 +179,23 @@ public actor VortexCoordinator: WorkspaceTerminationWatcher.Sink {
     public func unloadModel() async {
         await mlx.unloadModel()
         // Оттепель сделает монитор, когда увидит, что давления больше нет.
+    }
+
+    /// Текущее состояние master switch — для IPC `status`.
+    public func isFreezingEnabled() -> Bool { freezingEnabled }
+
+    /// Переключатель master switch (ADR 0017).
+    /// false → cancel pending thawTask, emergencyThaw всех замороженных,
+    /// дальнейшие pressure-эвенты игнорятся в `applyPolicy`.
+    /// true → ничего не делаем сразу; политика оживёт на следующем
+    /// `.warning`/`.critical`-эвенте от монитора.
+    public func setFreezingEnabled(_ enabled: Bool) async {
+        guard freezingEnabled != enabled else { return }
+        freezingEnabled = enabled
+        Self.log.notice("freezingEnabled → \(enabled, privacy: .public)")
+        if !enabled {
+            await emergencyThaw()
+        }
     }
 
     /// Жёсткая моментальная оттепель — для SIGINT/SIGTERM-обработчика.
@@ -267,7 +293,7 @@ public actor VortexCoordinator: WorkspaceTerminationWatcher.Sink {
             // Discord-frontmost'ом, например), он бы никогда не попал
             // под freeze. `freezeTier` идемпотентен (skip already-frozen
             // + frontmost-veto), безопасно вызывать повторно.
-            guard !sleeping, let bundleId else { break }
+            guard !sleeping, freezingEnabled, let bundleId else { break }
             let level = await monitor.currentLevel()
             if tier1BundleIds.contains(bundleId), level >= .warning {
                 await freezeTier(.tier1)
@@ -283,6 +309,14 @@ public actor VortexCoordinator: WorkspaceTerminationWatcher.Sink {
     }
 
     private func applyPolicy(_ level: MemoryPressureLevel) async {
+        // Master switch (ADR 0017): когда user явно выключил freeze через
+        // MenuBar Off, daemon продолжает крутить ContextStore/vision/IPC,
+        // но не SIGSTOP-ит ничего. emergencyThaw уже был вызван в момент
+        // переключения; здесь просто дропаем pressure-event.
+        if !freezingEnabled {
+            Self.log.info("policy event ignored: freezing disabled (level=\(level.rawValue, privacy: .public))")
+            return
+        }
         // Sleep-gate: во время sleep'а ничего не морозим. Pressure-эвенты
         // в это время не должны прилетать (CPU всё равно спит), но на
         // всякий случай явно дропаем — в момент willSleep мы уже сделали

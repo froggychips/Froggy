@@ -70,6 +70,12 @@ public struct FroggyConfig: Codable, Sendable, Equatable {
     /// См. ADR 0009.
     public var kvCacheBits: Int
 
+    /// Master switch для freeze-логики (ADR 0017).
+    /// false → coordinator игнорит pressure events и не морозит ничего.
+    /// MenuBar при Off-нажатии ставит false + unload model + thawAll.
+    /// Default true — backwards-compat с существующими config.json.
+    public var freezingEnabled: Bool
+
     public var ipcSocketPath: String
     public var frameSimilarityThreshold: Double
     public var contextWindowSize: Int
@@ -106,6 +112,7 @@ public struct FroggyConfig: Codable, Sendable, Equatable {
         vadRmsThreshold: Double = 0.008,
         freezeRankingEnabled: Bool = true,
         kvCacheBits: Int = 8,
+        freezingEnabled: Bool = true,
         ipcSocketPath: String = FroggyConfig.defaultSocketPath,
         frameSimilarityThreshold: Double = 0.98,
         contextWindowSize: Int = 30,
@@ -134,6 +141,7 @@ public struct FroggyConfig: Codable, Sendable, Equatable {
         self.vadRmsThreshold = vadRmsThreshold
         self.freezeRankingEnabled = freezeRankingEnabled
         self.kvCacheBits = kvCacheBits
+        self.freezingEnabled = freezingEnabled
         self.ipcSocketPath = ipcSocketPath
         self.frameSimilarityThreshold = frameSimilarityThreshold
         self.contextWindowSize = contextWindowSize
@@ -203,6 +211,7 @@ public struct FroggyConfig: Codable, Sendable, Equatable {
         self.vadEnabled = try c.decodeIfPresent(Bool.self, forKey: .vadEnabled) ?? d.vadEnabled
         self.vadRmsThreshold = try c.decodeIfPresent(Double.self, forKey: .vadRmsThreshold) ?? d.vadRmsThreshold
         self.kvCacheBits = try c.decodeIfPresent(Int.self, forKey: .kvCacheBits) ?? d.kvCacheBits
+        self.freezingEnabled = try c.decodeIfPresent(Bool.self, forKey: .freezingEnabled) ?? d.freezingEnabled
 
         self.ipcSocketPath = try c.decodeIfPresent(String.self, forKey: .ipcSocketPath) ?? d.ipcSocketPath
         self.frameSimilarityThreshold = try c.decodeIfPresent(Double.self, forKey: .frameSimilarityThreshold) ?? d.frameSimilarityThreshold

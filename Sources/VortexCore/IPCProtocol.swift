@@ -14,6 +14,8 @@ public struct IPCRequest: Codable, Sendable {
     public var experimental: Bool?
     /// Discord process PID для cmd `listen`.
     public var discordPid: Int32?
+    /// Универсальный Bool-параметр (используется в `setFreezingEnabled`).
+    public var enabled: Bool?
 
     public init(
         cmd: String,
@@ -25,7 +27,8 @@ public struct IPCRequest: Codable, Sendable {
         accessor: String? = nil,
         useContext: Bool? = nil,
         experimental: Bool? = nil,
-        discordPid: Int32? = nil
+        discordPid: Int32? = nil,
+        enabled: Bool? = nil
     ) {
         self.cmd = cmd
         self.prompt = prompt
@@ -37,6 +40,7 @@ public struct IPCRequest: Codable, Sendable {
         self.useContext = useContext
         self.experimental = experimental
         self.discordPid = discordPid
+        self.enabled = enabled
     }
 }
 
@@ -89,6 +93,9 @@ public struct IPCResponse: Codable, Sendable {
     public var audioInputDevice: String?
     /// Путь к markdown-файлу текущей/последней сессии созвона.
     public var sessionURL: String?
+    /// Master switch freeze-логики (ADR 0017). Возвращается в `status`,
+    /// принимается в `setFreezingEnabled`.
+    public var freezingEnabled: Bool?
 
     public init() {}
 

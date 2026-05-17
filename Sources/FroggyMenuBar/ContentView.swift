@@ -17,6 +17,8 @@ struct ContentView: View {
                 .buttonStyle(.borderless)
             }
 
+            activeToggle
+
             if model.needsScreenRecordingPermission {
                 tccBanner
             }
@@ -45,6 +47,44 @@ struct ContentView: View {
             .padding(.top, 4)
         }
         .padding(12)
+    }
+
+    // MARK: - Active toggle (ADR 0017)
+
+    /// Большой On/Off-тумблер. Off — daemon перестаёт морозить процессы и
+    /// выгружает MLX-модель (idle ~50 MB). Daemon продолжает крутиться,
+    /// IPC и capture работают.
+    @ViewBuilder
+    private var activeToggle: some View {
+        HStack(spacing: 10) {
+            Circle()
+                .fill(model.freezingEnabled ? Color.green : Color.gray)
+                .frame(width: 10, height: 10)
+            Text(model.freezingEnabled ? "Active" : "Paused")
+                .font(.subheadline).bold()
+                .foregroundStyle(model.freezingEnabled ? .primary : .secondary)
+            Spacer()
+            Toggle("", isOn: Binding(
+                get: { model.freezingEnabled },
+                set: { newValue in Task { await model.setActive(newValue) } }
+            ))
+            .toggleStyle(.switch)
+            .controlSize(.small)
+            .labelsHidden()
+            .disabled(model.isBusy)
+        }
+        .padding(.vertical, 4)
+        .padding(.horizontal, 8)
+        .background(
+            (model.freezingEnabled ? Color.green : Color.gray).opacity(0.10)
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 4)
+                .stroke(
+                    (model.freezingEnabled ? Color.green : Color.gray).opacity(0.4),
+                    lineWidth: 1
+                )
+        )
     }
 
     // MARK: - TCC banner

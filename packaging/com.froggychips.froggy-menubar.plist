@@ -1,0 +1,48 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.froggychips.froggy-menubar</string>
+
+    <!-- ADR 0017: MenuBar поднимается отдельным LaunchAgent'ом параллельно
+         с daemon'ом, чтобы пользователь всегда мог нажать On/Off из меню.
+         Без отдельного plist'а menubar пришлось бы запускать вручную, и
+         daemon в фоне продолжал бы морозить процессы без видимого UI.
+
+         Замените путь после `swift build -c release --product FroggyMenuBar`
+         на абсолютный путь к собранному бинарю. Если упаковано в .app
+         bundle — используйте `/usr/bin/open` с `-a /Applications/Froggy.app`
+         вместо прямого вызова executable. -->
+    <key>ProgramArguments</key>
+    <array>
+        <string>/usr/local/libexec/FroggyMenuBar</string>
+    </array>
+
+    <key>EnvironmentVariables</key>
+    <dict/>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <!-- Перезапускать если упал — но не если сам пользователь quit-нул
+         через "Quit Froggy UI". SuccessfulExit=false означает: на
+         нормальный exit(0) launchd НЕ перезапустит. -->
+    <key>KeepAlive</key>
+    <dict>
+        <key>SuccessfulExit</key>
+        <false/>
+    </dict>
+
+    <!-- MenuBar — это GUI с MenuBarExtra, требует Aqua session. -->
+    <key>ProcessType</key>
+    <string>Interactive</string>
+    <key>LimitLoadToSessionType</key>
+    <string>Aqua</string>
+
+    <key>StandardOutPath</key>
+    <string>/tmp/froggy-menubar.log</string>
+    <key>StandardErrorPath</key>
+    <string>/tmp/froggy-menubar.log</string>
+</dict>
+</plist>

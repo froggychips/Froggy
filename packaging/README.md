@@ -85,15 +85,35 @@ xcrun stapler staple .build/arm64-apple-macosx/release/FroggyDaemon
 sudo install -m 0755 \
     .build/arm64-apple-macosx/release/FroggyDaemon \
     /usr/local/libexec/FroggyDaemon
+sudo install -m 0755 \
+    .build/arm64-apple-macosx/release/FroggyMenuBar \
+    /usr/local/libexec/FroggyMenuBar
 
 mkdir -p ~/Library/LaunchAgents
 cp packaging/com.froggychips.froggy.plist \
     ~/Library/LaunchAgents/com.froggychips.froggy.plist
+cp packaging/com.froggychips.froggy-menubar.plist \
+    ~/Library/LaunchAgents/com.froggychips.froggy-menubar.plist
 
 launchctl bootstrap "gui/$(id -u)" \
     ~/Library/LaunchAgents/com.froggychips.froggy.plist
+launchctl bootstrap "gui/$(id -u)" \
+    ~/Library/LaunchAgents/com.froggychips.froggy-menubar.plist
 launchctl kickstart -k "gui/$(id -u)/com.froggychips.froggy"
+launchctl kickstart -k "gui/$(id -u)/com.froggychips.froggy-menubar"
 ```
+
+### Зачем второй LaunchAgent (ADR 0017)
+
+`com.froggychips.froggy-menubar.plist` поднимает MenuBar UI параллельно
+с daemon-ом. Без него daemon молча морозит процессы в фоне, и единственный
+способ выключить его — `launchctl bootout` через терминал. С отдельным
+agent-ом у пользователя всегда есть On/Off-тумблер в меню-баре: Off
+выгружает MLX-модель и thaw-ит все замороженные pid-ы за один клик.
+
+Daemon respect-ит `config.freezingEnabled` при старте — если предыдущая
+сессия завершилась в Off, daemon поднимется в idle-режиме (~50 MB,
+модель не грузится, freeze-логика отключена) и будет ждать On из MenuBar.
 
 ## 5. First run
 
@@ -118,8 +138,11 @@ echo '{"cmd":"status"}' | nc -U ~/Library/Application\ Support/Froggy/froggy.soc
 ## Uninstall
 
 ```sh
+launchctl bootout "gui/$(id -u)/com.froggychips.froggy-menubar"
 launchctl bootout "gui/$(id -u)/com.froggychips.froggy"
+rm ~/Library/LaunchAgents/com.froggychips.froggy-menubar.plist
 rm ~/Library/LaunchAgents/com.froggychips.froggy.plist
+sudo rm /usr/local/libexec/FroggyMenuBar
 sudo rm /usr/local/libexec/FroggyDaemon
 rm -rf ~/Library/Application\ Support/Froggy
 ```

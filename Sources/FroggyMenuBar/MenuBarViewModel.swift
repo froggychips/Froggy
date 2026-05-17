@@ -18,6 +18,11 @@ final class MenuBarViewModel: ObservableObject {
     /// TCC denied. Используем как мягкий триггер для warning-banner.
     @Published var capturingSinceWithoutFrames: Date?
 
+    /// ADR 0017: master switch — отражает `status.freezingEnabled` или
+    /// optimistic-value во время toggle, чтобы UI не мигал между запросом
+    /// и следующим refresh'ем.
+    @Published var freezingEnabled: Bool = true
+
     private let client: IPCClient
     private var pollTask: Task<Void, Never>?
     private var generateTask: Task<Void, Never>?
@@ -35,6 +40,9 @@ final class MenuBarViewModel: ObservableObject {
     var menuBarLabel: String {
         guard let s = status else { return "🐸 …" }
         if needsScreenRecordingPermission { return "🐸 ⚠︎" }
+        // Off-state: явно отличаем от idle, чтобы было видно из меню-бара,
+        // что daemon не морозит ничего.
+        if freezingEnabled == false { return "🐸 ⏸" }
         if s.modelLoaded == true { return "🐸 ●" }
         if s.capturing == true { return "🐸 ◌" }
         return "🐸"
@@ -71,6 +79,9 @@ final class MenuBarViewModel: ObservableObject {
             } else {
                 capturingSinceWithoutFrames = nil
             }
+            // freezingEnabled может прийти nil от старого daemon-а (без ADR 0017
+            // изменений в IPC) — тогда считаем что включено (legacy behaviour).
+            freezingEnabled = r.freezingEnabled ?? true
             status = r
             lastError = nil
         } catch {
@@ -121,6 +132,34 @@ final class MenuBarViewModel: ObservableObject {
             await refreshStatus()
         } catch {
             lastError = String(describing: error)
+        }
+    }
+
+    /// ADR 0017: атомарный On/Off для MenuBar.
+    /// Off → setFreezingEnabled(false) + unloadModel + thawAll, чтобы daemon
+    /// уехал в idle ~50 MB без замороженных pid'ов и без MLX worker'а.
+    /// Daemon при этом продолжает крутиться (capture/IPC), переключение
+    /// обратимо: On → user сам нажмёт Load чтобы вернуть модель.
+    /// Optimistic-update freezingEnabled — UI не мигает между нажатием и
+    /// следующим pollTask-rifresh'ем (5с интервал).
+    func setActive(_ active: Bool) async {
+        isBusy = true
+        defer { isBusy = false }
+        freezingEnabled = active
+        do {
+            _ = try await client.setFreezingEnabled(active)
+            if !active {
+                // setFreezingEnabled на daemon-side уже сделал emergencyThaw;
+                // отдельный thawAll не нужен. Модель — отдельный shutdown,
+                // координатор её не трогает.
+                if status?.modelLoaded == true {
+                    _ = try await client.unloadModel()
+                }
+            }
+            await refreshStatus()
+        } catch {
+            lastError = String(describing: error)
+            await refreshStatus()  // вернуть UI к фактическому состоянию
         }
     }
 

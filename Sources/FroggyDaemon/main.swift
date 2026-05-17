@@ -102,7 +102,8 @@ struct FroggyDaemon {
             audioLocale: config.audioLocale,
             audioOnDeviceRecognition: config.audioOnDeviceRecognition,
             echoSuppressionEnabled: config.echoSuppressionEnabled,
-            echoSuppressionTailMs: config.echoSuppressionTailMs
+            echoSuppressionTailMs: config.echoSuppressionTailMs,
+            freezingEnabled: config.freezingEnabled
         )
         await coordinator.startMonitoring()
         // Termination-watcher: чистит FrozenPidsStore при внешнем kill'е.
@@ -142,13 +143,18 @@ struct FroggyDaemon {
 
         installSignalHandlers(coordinator: coordinator, audioSupervisor: audioSupervisor)
 
-        if let modelPath = config.modelPath {
+        if config.freezingEnabled, let modelPath = config.modelPath {
             do {
                 try await coordinator.loadModel(modelPath: modelPath)
                 log.info("model loaded: \(modelPath, privacy: .public)")
             } catch {
                 log.error("model load failed: \(error.localizedDescription, privacy: .public)")
             }
+        } else if !config.freezingEnabled {
+            // ADR 0017: при freezingEnabled=false автозагрузку модели на старте
+            // тоже пропускаем — Off-state означает «daemon в idle ~50 MB».
+            // User явно включит через MenuBar On + Load.
+            log.notice("freezing disabled — model autoload skipped (idle mode)")
         } else {
             log.notice("no model path configured; daemon runs without LLM")
         }
@@ -312,6 +318,28 @@ struct DaemonIPCHandler: IPCRequestHandler, Sendable {
             r.listening = await audioSupervisor.isCapturing()
             r.audioOutputDevice = AudioSupervisor.currentOutputDeviceName()
             r.audioInputDevice = AudioSupervisor.currentInputDeviceName()
+            r.freezingEnabled = await coordinator.isFreezingEnabled()
+            r.final = true
+            return r
+
+        case "setFreezingEnabled":
+            // ADR 0017. enabled=false — MenuBar Off: координатор перестаёт
+            // морозить и сразу thaw-ит всё, что было заморожено. Persist в
+            // config.json, чтобы переживать рестарт daemon-а.
+            guard let enabled = request.enabled else {
+                return .failure("missing 'enabled'")
+            }
+            await coordinator.setFreezingEnabled(enabled)
+            do {
+                var cfg = (try? FroggyConfig.load()) ?? FroggyConfig()
+                cfg.freezingEnabled = enabled
+                try cfg.save()
+            } catch {
+                log.warning("freezingEnabled persist failed: \(error.localizedDescription, privacy: .public)")
+            }
+            var r = IPCResponse()
+            r.ok = true
+            r.freezingEnabled = enabled
             r.final = true
             return r
 

@@ -157,6 +157,13 @@ public actor IPCClient {
         try await send(IPCRequest(cmd: "unloadModel"))
     }
 
+    /// Master switch freeze-логики (ADR 0017). false → daemon перестаёт
+    /// SIGSTOP-ить процессы и сразу thaw-ит всех уже замороженных.
+    /// Persistится в config.json.
+    public func setFreezingEnabled(_ enabled: Bool) async throws -> IPCResponse {
+        try await send(IPCRequest(cmd: "setFreezingEnabled", enabled: enabled))
+    }
+
     public func freeze(pid: Int32) async throws -> IPCResponse {
         try await send(IPCRequest(cmd: "freeze", pid: pid))
     }
