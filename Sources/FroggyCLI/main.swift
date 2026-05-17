@@ -30,6 +30,7 @@ struct FroggyCLI {
             case "listen-status": try await Self.runListenStatus(client)
             case "listen-stream": try await Self.runListenStream(client)
             case "recap": try await Self.runRecap(client, rest)
+            case "audit": try await Self.runAudit(rest)
             case "-h", "--help", "help":
                 print(Self.usage)
                 exit(0)
@@ -253,6 +254,41 @@ struct FroggyCLI {
         }
     }
 
+    /// Issue #63: `froggy audit` — pretty-print последних N записей из
+    /// audit-лога. Без IPC — читает файл напрямую. Это нарочно: если daemon
+    /// упал, audit-trail остаётся читаемым.
+    private static func runAudit(_ args: [String]) async throws {
+        var limit = 50
+        var day: String?
+        var i = 0
+        while i < args.count {
+            if args[i] == "--limit", i + 1 < args.count, let v = Int(args[i + 1]) {
+                limit = v; i += 2
+            } else if args[i] == "--day", i + 1 < args.count {
+                day = args[i + 1]; i += 2
+            } else {
+                stderr("usage: froggy audit [--limit N] [--day YYYY-MM-DD]"); exit(2)
+            }
+        }
+        let auditLog = AuditLog()
+        let records = await auditLog.tail(limit: limit, day: day)
+        if records.isEmpty {
+            print("(no audit records)")
+            return
+        }
+        for r in records {
+            // Компактная строка для tail-style чтения. Полный JSON всё
+            // равно лежит в audit-YYYY-MM-DD.log если нужны все поля.
+            var line = "\(r.ts)  \(r.op.padding(toLength: 7, withPad: " ", startingAt: 0))"
+            if let pid = r.pid { line += "  pid=\(pid)" }
+            if let bundleId = r.bundleId { line += "  app=\(bundleId)" }
+            if let tier = r.tier { line += "  tier=\(tier)" }
+            line += "  reason=\(r.reason)"
+            if let outcome = r.outcome, outcome != "ok" { line += "  outcome=\(outcome)" }
+            print(line)
+        }
+    }
+
     private static func runRecap(_ client: IPCClient, _ args: [String]) async throws {
         var path: String? = nil
         var i = 0
@@ -300,6 +336,7 @@ struct FroggyCLI {
       listen-status                       show whether transcription is active
       listen-stream                       stream transcript chunks to stdout (blocking)
       recap [--path <file>]               generate LLM summary of last session (streams tokens)
+      audit [--limit N] [--day YYYY-MM-DD] pretty-print recent freeze/thaw audit records
       help                                this message
 
     Environment:

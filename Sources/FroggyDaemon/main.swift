@@ -49,6 +49,15 @@ struct FroggyDaemon {
             log.notice("recovered \(recovered) frozen pids from previous run")
         }
 
+        // Issue #63: audit-trail. Setup создаёт директорию и pruning'нет
+        // файлы старше 30 дней. Boot-recovery thaw'ам логируем сразу.
+        let auditLog = AuditLog()
+        await auditLog.setUp()
+        if recovered > 0 {
+            await auditLog.record(op: "thawAll", reason: "boot_recovery",
+                                  outcome: "recovered:\(recovered)")
+        }
+
         let pageoutChain = PageoutChain(
             preferred: config.pageoutStrategy,
             machVM: MachVMPageoutImpl(),
@@ -114,7 +123,8 @@ struct FroggyDaemon {
             audioOnDeviceRecognition: config.audioOnDeviceRecognition,
             echoSuppressionEnabled: config.echoSuppressionEnabled,
             echoSuppressionTailMs: config.echoSuppressionTailMs,
-            freezingEnabled: config.freezingEnabled
+            freezingEnabled: config.freezingEnabled,
+            auditLog: auditLog
         )
         await coordinator.startMonitoring()
         // Termination-watcher: чистит FrozenPidsStore при внешнем kill'е.
@@ -180,7 +190,8 @@ struct FroggyDaemon {
             freezeStats: freezeStats,
             defaultContextChars: config.contextMaxChars,
             audioSupervisor: audioSupervisor,
-            discordNotifyWebhookURL: config.discordNotifyWebhookURL
+            discordNotifyWebhookURL: config.discordNotifyWebhookURL,
+            auditLog: auditLog
         )
         let ipc = IPCServer(socketPath: config.ipcSocketPath, handler: handler)
         do {
@@ -304,6 +315,7 @@ struct DaemonIPCHandler: IPCRequestHandler, Sendable {
     let defaultContextChars: Int
     let audioSupervisor: AudioSupervisor
     let discordNotifyWebhookURL: String?
+    let auditLog: AuditLog?
 
     /// Fire-and-forget уведомление в Discord webhook. Не блокирует IPC.
     private func notifyDiscord(_ message: String) {
@@ -475,26 +487,39 @@ struct DaemonIPCHandler: IPCRequestHandler, Sendable {
 
         case "freeze":
             let targetPid: Int32
+            let bundleIdHint: String?
             if let pid = request.pid {
                 targetPid = pid
+                bundleIdHint = nil
             } else if let bundleId = request.path {
                 let pids = await NSWorkspaceProcessFinder().pids(forBundleIds: [bundleId])
                 guard let found = pids.first else {
                     return .failure("app not running: \(bundleId)")
                 }
                 targetPid = found
+                bundleIdHint = bundleId
             } else {
                 return .failure("missing 'pid' or bundle_id (path)")
             }
             do {
                 try await vortex.freezeProcess(pid: targetPid)
+                await auditLog?.record(
+                    op: "freeze", pid: targetPid, bundleId: bundleIdHint,
+                    tier: "manual", reason: "manual_ipc", outcome: "ok"
+                )
                 return .success()
             } catch {
+                await auditLog?.record(
+                    op: "freeze", pid: targetPid, bundleId: bundleIdHint,
+                    tier: "manual", reason: "manual_ipc",
+                    outcome: "failed:\(error.localizedDescription)"
+                )
                 return .failure(String(describing: error))
             }
 
         case "thawAll":
             await vortex.thawAll()
+            await auditLog?.record(op: "thawAll", reason: "manual_ipc", outcome: "ok")
             return .success()
 
         case "listen":

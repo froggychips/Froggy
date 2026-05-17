@@ -46,6 +46,9 @@ public actor VortexCoordinator: WorkspaceTerminationWatcher.Sink {
     private let tier2BundleIds: [String]
     /// Через сколько секунд после оттепели tier-2 размораживать tier-1.
     private let gradualThawDelaySeconds: TimeInterval
+    /// Issue #63: optional audit-trail для freeze/thaw операций.
+    /// nil — записи не пишутся (используется в юнит-тестах).
+    private let auditLog: AuditLog?
 
     private var tier1Frozen: Set<Int32> = []
     private var tier2Frozen: Set<Int32> = []
@@ -95,7 +98,8 @@ public actor VortexCoordinator: WorkspaceTerminationWatcher.Sink {
         echoSuppressionTailMs: Int = 400,
         vadEnabled: Bool = true,
         vadRmsThreshold: Double = 0.008,
-        freezingEnabled: Bool = true
+        freezingEnabled: Bool = true,
+        auditLog: AuditLog? = nil
     ) {
         self.mlx = mlx
         self.vortex = vortex
@@ -114,6 +118,7 @@ public actor VortexCoordinator: WorkspaceTerminationWatcher.Sink {
         self.vadEnabled = vadEnabled
         self.vadRmsThreshold = vadRmsThreshold
         self.freezingEnabled = freezingEnabled
+        self.auditLog = auditLog
     }
 
     // MARK: - Lifecycle
@@ -245,9 +250,10 @@ public actor VortexCoordinator: WorkspaceTerminationWatcher.Sink {
     public func emergencyThaw() async {
         thawTask?.cancel()
         thawTask = nil
-        await thawTier(.tier2)
-        await thawTier(.tier1)
+        await thawTier(.tier2, reason: "emergency")
+        await thawTier(.tier1, reason: "emergency")
         await vortex.thawAll()
+        await auditLog?.record(op: "thawAll", reason: "emergency")
     }
 
     public func generate(prompt: String, maxTokens: Int = 200) async throws -> String {
@@ -407,14 +413,15 @@ public actor VortexCoordinator: WorkspaceTerminationWatcher.Sink {
                 "pressure_level=\(level.rawValue) tier1=\(self.tier1Frozen.count) tier2=\(self.tier2Frozen.count)"
             )
         }
+        let pressureReason = "pressure_\(level.rawValue)"
         switch level {
         case .warning:
             thawTask?.cancel(); thawTask = nil
-            await freezeTier(.tier1)
+            await freezeTier(.tier1, reason: pressureReason)
         case .critical:
             thawTask?.cancel(); thawTask = nil
-            await freezeTier(.tier1)
-            await freezeTier(.tier2)
+            await freezeTier(.tier1, reason: pressureReason)
+            await freezeTier(.tier2, reason: pressureReason)
         case .normal:
             // Tier-2 отпускаем сразу, tier-1 — через задержку, чтобы дать
             // системе ещё чуть-чуть «выдохнуть» перед возвращением фоновых
@@ -423,10 +430,10 @@ public actor VortexCoordinator: WorkspaceTerminationWatcher.Sink {
             thawTask?.cancel()
             let delay = gradualThawDelaySeconds
             thawTask = Task { [weak self] in
-                await self?.thawTier(.tier2)
+                await self?.thawTier(.tier2, reason: pressureReason)
                 try? await Task.sleep(for: .seconds(delay))
                 guard !Task.isCancelled else { return }
-                await self?.thawTier(.tier1)
+                await self?.thawTier(.tier1, reason: pressureReason)
             }
         }
     }
@@ -436,36 +443,57 @@ public actor VortexCoordinator: WorkspaceTerminationWatcher.Sink {
         case tier2
     }
 
-    private func freezeTier(_ tier: Tier) async {
+    private func freezeTier(_ tier: Tier, reason: String = "manual") async {
         let bundleIds = tier == .tier1 ? tier1BundleIds : tier2BundleIds
-        let pids = await finder.pids(forBundleIds: bundleIds)
-        for pid in pids {
-            // Skip уже-замороженные в любом из tier'ов.
-            if tier1Frozen.contains(pid) || tier2Frozen.contains(pid) { continue }
-            // Frontmost-veto (ADR 0015): pid frontmost-app никогда не морозим,
-            // даже если его bundleId в allowlist'е. Закрывает «freeze
-            // посередине набора текста». NSWorkspace-only уровень — typing
-            // через Accessibility API явно вне scope'а.
-            if let frontmostPid, pid == frontmostPid {
-                Self.log.info("freeze pid=\(pid, privacy: .public) tier=\(String(describing: tier), privacy: .public) vetoed: frontmost")
-                continue
-            }
-            do {
-                try await vortex.freezeProcess(pid: pid)
-                switch tier {
-                case .tier1: tier1Frozen.insert(pid)
-                case .tier2: tier2Frozen.insert(pid)
+        // Issue #63: ходим per-bundleId чтобы знать соответствие pid→bundleId
+        // для audit-записи. ProcessFinder.pids(forBundleIds:) уплощает массив
+        // и теряет это соответствие. Стоимость 2-3 NSWorkspace-вызова на tier —
+        // дешёво по сравнению с самим SIGSTOP.
+        let tierName = tier == .tier1 ? "1" : "2"
+        for bundleId in bundleIds {
+            let pids = await finder.pids(forBundleIds: [bundleId])
+            for pid in pids {
+                // Skip уже-замороженные в любом из tier'ов.
+                if tier1Frozen.contains(pid) || tier2Frozen.contains(pid) { continue }
+                // Frontmost-veto (ADR 0015): pid frontmost-app никогда не морозим.
+                if let frontmostPid, pid == frontmostPid {
+                    Self.log.info("freeze pid=\(pid, privacy: .public) tier=\(tierName, privacy: .public) vetoed: frontmost")
+                    await auditLog?.record(
+                        op: "freeze", pid: pid, bundleId: bundleId,
+                        tier: tierName, reason: reason, outcome: "skipped:frontmost"
+                    )
+                    continue
                 }
-            } catch {
-                Self.log.warning("freeze pid=\(pid) tier=\(String(describing: tier), privacy: .public) skipped: \(error.localizedDescription, privacy: .public)")
+                do {
+                    try await vortex.freezeProcess(pid: pid)
+                    switch tier {
+                    case .tier1: tier1Frozen.insert(pid)
+                    case .tier2: tier2Frozen.insert(pid)
+                    }
+                    await auditLog?.record(
+                        op: "freeze", pid: pid, bundleId: bundleId,
+                        tier: tierName, reason: reason, outcome: "ok"
+                    )
+                } catch {
+                    Self.log.warning("freeze pid=\(pid) tier=\(tierName, privacy: .public) skipped: \(error.localizedDescription, privacy: .public)")
+                    await auditLog?.record(
+                        op: "freeze", pid: pid, bundleId: bundleId,
+                        tier: tierName, reason: reason,
+                        outcome: "failed:\(error.localizedDescription)"
+                    )
+                }
             }
         }
     }
 
-    private func thawTier(_ tier: Tier) async {
+    private func thawTier(_ tier: Tier, reason: String = "manual") async {
         let pids = tier == .tier1 ? tier1Frozen : tier2Frozen
+        let tierName = tier == .tier1 ? "1" : "2"
         for pid in pids {
             await vortex.thawProcess(pid: pid)
+            await auditLog?.record(
+                op: "thaw", pid: pid, tier: tierName, reason: reason, outcome: "ok"
+            )
         }
         switch tier {
         case .tier1: tier1Frozen.removeAll()
