@@ -76,7 +76,7 @@ The list of frozen process IDs is a privileged resource. If this file or its in-
 
 - **Redactor is incomplete.** Regex-based secret detection cannot cover every possible secret format. Do not rely on Redactor as the sole control for keeping secrets off disk — treat OCR output as potentially sensitive.
 - **`task_for_pid-allow` is a broad entitlement.** It is required for the frozen-process feature but grants more privilege than strictly necessary. A future hardening goal is to scope this to a helper tool with a narrower entitlement set.
-- **No IPC authentication.** The Unix socket between processes does not authenticate the connecting peer beyond OS-level UID checks. A process running as the same user can connect.
+- **IPC authentication via peer UID (`getpeereid`) + `chmod 0600`.** After `accept()`, the daemon reads the peer's effective UID with `getpeereid(2)` and closes the connection if it does not match its own UID; the peer PID is read via `LOCAL_PEERPID` and logged with the first command for audit. This is defence in depth on top of the `0600` permissions on the socket file. Note that **any process running under the same UID is still inside the trust boundary** — a malicious helper launched in the user's session can still connect. If you need a tighter boundary (e.g. only allow `FroggyMenuBar` and `froggy` CLI bundles), see issue tracker for follow-up work on bundle-identifier checks via `LOCAL_PEERPID` → `proc_pidpath`.
 
 ## Response SLA
 

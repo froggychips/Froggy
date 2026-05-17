@@ -136,6 +136,41 @@ public actor IPCServer {
         return rc == 0
     }
 
+    // MARK: - Peer authentication (issue #62)
+
+    /// Issue #62: peer credentials через `getpeereid` + Darwin-only
+    /// `LOCAL_PEERPID`. Используется acceptLoop'ом: connections от чужого
+    /// uid отвергаются ещё до парсинга первой команды. Расширяет старую
+    /// «защиту только через `chmod 0600` сокет-файла».
+    public struct PeerCredentials: Sendable, Equatable {
+        public let uid: uid_t
+        public let gid: gid_t
+        /// pid пир-процесса (`LOCAL_PEERPID`). 0 если getsockopt не сработал
+        /// — uid важнее, pid берём best-effort для audit log'а.
+        public let pid: pid_t
+    }
+
+    /// Реальный uid процесса. Каплено в static, чтобы не дёргать `getuid()`
+    /// на каждом accept (он thread-safe но всё-таки syscall).
+    nonisolated static let processUid: uid_t = getuid()
+
+    /// nonisolated, чтобы можно было звать из `acceptLoop` (static context)
+    /// и из тестов. Возвращает nil только если getpeereid вернул ошибку —
+    /// в этом случае соединение мы тоже не пропустим (см. acceptLoop).
+    nonisolated public static func peerCredentials(fd: Int32) -> PeerCredentials? {
+        var uid: uid_t = 0
+        var gid: gid_t = 0
+        guard getpeereid(fd, &uid, &gid) == 0 else { return nil }
+
+        // LOCAL_PEERPID — Darwin-specific socket option в SOL_LOCAL.
+        // На случай если ядро не отдаст pid (теоретически возможно при
+        // race с pid recycling), берём pid=0; auth по uid не страдает.
+        var pid: pid_t = 0
+        var pidLen = socklen_t(MemoryLayout<pid_t>.size)
+        let pidRC = getsockopt(fd, SOL_LOCAL, LOCAL_PEERPID, &pid, &pidLen)
+        return PeerCredentials(uid: uid, gid: gid, pid: pidRC == 0 ? pid : 0)
+    }
+
     // MARK: - Accept loop
 
     private static func acceptLoop(
@@ -155,18 +190,42 @@ public actor IPCServer {
                 Self.log.warning("accept failed: errno=\(e)")
                 break
             }
+
+            // Issue #62: peer authentication. Сокет уже под `chmod 0600`,
+            // но defense-in-depth — после accept'а сверяем uid пира с нашим.
+            // Mismatch (чужой пользователь) или getpeereid failure → close.
+            // Не log.error: пользователь может видеть это в логе на нормальном
+            // сценарии «случайный процесс под другим uid соединился», ему
+            // достаточно warning'а.
+            guard let peer = peerCredentials(fd: cfd) else {
+                Self.log.warning("peer credential lookup failed for fd=\(cfd) — closing connection")
+                close(cfd)
+                continue
+            }
+            if peer.uid != processUid {
+                Self.log.warning(
+                    "rejected ipc peer uid=\(peer.uid, privacy: .public) pid=\(peer.pid, privacy: .public) — daemon uid=\(processUid, privacy: .public)"
+                )
+                close(cfd)
+                continue
+            }
+
             let h = handler
+            let peerPid = peer.pid
             Task.detached {
-                await IPCServer.handleConnection(fd: cfd, handler: h)
+                await IPCServer.handleConnection(fd: cfd, peerPid: peerPid, handler: h)
             }
         }
         Self.log.info("accept loop exited")
     }
 
-    private static func handleConnection(fd: Int32, handler: any IPCRequestHandler) async {
+    private static func handleConnection(
+        fd: Int32, peerPid: pid_t, handler: any IPCRequestHandler
+    ) async {
         defer { close(fd) }
         var buffer = Data()
         var chunk = [UInt8](repeating: 0, count: 4096)
+        var firstCommandLogged = false
         while !Task.isCancelled {
             let n = chunk.withUnsafeMutableBufferPointer { ptr -> Int in
                 read(fd, ptr.baseAddress, ptr.count)
@@ -181,17 +240,34 @@ public actor IPCServer {
                 let endOffset = buffer.distance(from: buffer.startIndex, to: nl)
                 let line = Data(buffer.prefix(endOffset))
                 buffer.removeSubrange(buffer.startIndex...nl)
-                await processLine(line: line, fd: fd, handler: handler)
+                await processLine(
+                    line: line,
+                    fd: fd,
+                    peerPid: peerPid,
+                    firstCommandLogged: &firstCommandLogged,
+                    handler: handler
+                )
             }
         }
     }
 
     private static func processLine(
-        line: Data, fd: Int32, handler: any IPCRequestHandler
+        line: Data,
+        fd: Int32,
+        peerPid: pid_t,
+        firstCommandLogged: inout Bool,
+        handler: any IPCRequestHandler
     ) async {
         guard let req = try? JSONDecoder().decode(IPCRequest.self, from: line) else {
             writeJSONLine(.failure("malformed request"), to: fd)
             return
+        }
+        // Issue #62: первая команда на соединении логируется с peer pid —
+        // даёт audit-trail «кто и когда подключался» без необходимости
+        // парсить unified log от всех subsystem'ов.
+        if !firstCommandLogged {
+            Self.log.info("ipc peer pid=\(peerPid, privacy: .public) cmd=\(req.cmd, privacy: .public)")
+            firstCommandLogged = true
         }
         // POI: один interval на весь IPC roundtrip — от parse'а до response-write.
         // Streaming запросы тоже укладываются в один interval — от parse до
