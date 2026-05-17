@@ -1,36 +1,37 @@
-# Post-freeze TODO
+# Post-freeze TODO — ✅ ЗАКРЫТ 2026-05-17
 
-Tracking list of `Sources/**`-touching work intentionally deferred during
-the 2026-05-09 → 2026-05-16 code freeze. Each entry has a dedicated
-GitHub issue with acceptance criteria, file paths, and effort estimate.
+Все 7 issues из POST_FREEZE roadmap'а закрыты за один сессионный день
+(2026-05-17). Документ оставлен как историческая запись + ссылки на
+конкретные commit'ы для будущих археологов.
 
-Sourced from the critique of the deep-research review of the Froggy
-ecosystem (April–May 2026 iteration): items that are real gaps, not
-out-of-scope advice. Cross-cutting recommendations that were rejected
+Эпики уехали в `v0.5.0` (большая часть) и `v0.5.1` (OCR-триплет):
+- https://github.com/froggychips/Froggy/releases/tag/v0.5.0
+- https://github.com/froggychips/Froggy/releases/tag/v0.5.1
+
+Cross-cutting recommendations, которые были осознанно **отвергнуты**
 (Erlang-style supervision trees, MLX worker pool, OpenTelemetry,
-AXObserver replacement for NSWorkspace, encryption of local stores)
-are *not* listed here — see PR history of ADR-0008 and ADR-0015 for
-rationale.
+AXObserver replacement for NSWorkspace, encryption of local stores) —
+не делались и не планируются; rationale в ADR-0008 и ADR-0015.
 
 ## Wire protocol
 
-- [ ] **[#57](https://github.com/froggychips/Froggy/issues/57) — `apiVersion` в wire-протоколах MLX / Audio / IPC.** Опциональное поле + version-mismatch warning. Защищает от ситуации «новый daemon + старый worker» при ручной замене бинаря или `mlxWorkerPath` override. Forward-compat через `decodeIfPresent`. Effort: 2-3 ч.
+- [x] **[#57](https://github.com/froggychips/Froggy/issues/57) — `apiVersion` в wire-протоколах MLX / Audio / IPC.** Опциональное поле + version-mismatch warning. Защищает от ситуации «новый daemon + старый worker» при ручной замене бинаря или `mlxWorkerPath` override. Forward-compat через `decodeIfPresent`. _Closed: `c8fafc1` (effort 2.5ч)._
 
 ## Supervision
 
-- [ ] **[#58](https://github.com/froggychips/Froggy/issues/58) — общий `WorkerSupervisor` protocol.** Дедупликация ~150-200 строк pipe-lifecycle (`waitForExit`/`OneShotResolver`/`ReadBridge`/graceful shutdown→SIGKILL) между `MLXSupervisor` и `AudioSupervisor`. **Не** Erlang tree (отвергнуто в ADR-0008). Effort: 6-8 ч.
-- [ ] **[#64](https://github.com/froggychips/Froggy/issues/64) — State machine для `VortexCoordinator` lifecycle.** `enum CoordinatorState { idle, starting, ready, degraded(reason), recovering, stopping }`, exposed через IPC `status`, signpost-логирование transitions. Закрывает дыру «почему демон не реагирует, как диагностировать». Effort: 5-6 ч.
+- [x] **[#58](https://github.com/froggychips/Froggy/issues/58) — общий `WorkerSupervisor` protocol.** Реализован как `WorkerProcessHost` (композиция, не protocol/inheritance). Дедуп −222 строки в MLX+Audio supervisor'ах. Audio worker теперь тоже регистрируется в `FrozenPidsStore.categoryWorker` для boot-recovery. _Closed: `67519ba` (effort 3ч)._
+- [x] **[#64](https://github.com/froggychips/Froggy/issues/64) — State machine для `VortexCoordinator` lifecycle.** `enum CoordinatorState { idle, starting, ready, degraded(reason), recovering, stopping }`, exposed через IPC `status` + CLI `froggy status`, signpost POI events на каждом transition. Crash MLX worker → ready→degraded; loadModel из degraded → recovering→ready/degraded. _Closed: `40c05c4` (effort 2.5ч)._
 
 ## Memory pressure + OCR pipeline
 
-- [ ] **[#59](https://github.com/froggychips/Froggy/issues/59) — адаптивный `FramePacer` под уровень memory pressure.** `.warning` → x2 capture interval, `.critical` → x4 / пауза. Debounced возврат. Сейчас pacer статичен, OCR гоняется тем же темпом даже под красной зоной. Effort: 4-5 ч.
-- [ ] **[#60](https://github.com/froggychips/Froggy/issues/60) — семантический OCR-diff поверх `FrameDigest`.** Пропускать `ContextStore.append`, если набор распознанных строк не изменился, даже если 32×32 pixel-fingerprint поплыл (анимация курсора, прогрессбары). Ожидаем 30-50% reduction в snapshot count на типичной сессии. Effort: 3-4 ч.
-- [ ] **[#61](https://github.com/froggychips/Froggy/issues/61) — skip-list для динамических элементов в OCR.** Regex-pattern фильтр (часы, прогрессбары, percentage). User-extendable через `~/Library/Application Support/Froggy/ocr-skip-patterns.json`, по аналогии с Redactor. Effort: 4 ч.
+- [x] **[#59](https://github.com/froggychips/Froggy/issues/59) — адаптивный `FramePacer` под уровень memory pressure.** `.warning` → ×2, `.critical` → ×4, multipliers конфигурируются. Debounce встроен в `MemoryPressureMonitor.cooldownSeconds`. _Closed: `e19c3e1` (effort 1.5ч)._
+- [x] **[#60](https://github.com/froggychips/Froggy/issues/60) — семантический OCR-diff поверх `FrameDigest`.** `normalizeForSemanticDiff` (trim+sort+join) — если набор строк тот же, push в `ContextStore` пропускается. _Closed: `8d49506` (effort 1ч)._
+- [x] **[#61](https://github.com/froggychips/Froggy/issues/61) — skip-list для динамических элементов в OCR.** `OCRSkipList` с default-патчами (HH:MM, N%, file sizes, versions, bare numeric), config-override + user-file. _Closed: `ed81b92` (effort 1.5ч)._
 
 ## Security / privacy
 
-- [ ] **[#62](https://github.com/froggychips/Froggy/issues/62) — IPC peer auth через `getpeereid`.** Помечено как hardening opportunity в `SECURITY.md`. Сейчас защита — только `chmod 0600` на socket-файле; любой процесс под этим юзером может слать команды. После `accept()` сверять uid, mismatch → close + log. Effort: 2-3 ч.
-- [ ] **[#63](https://github.com/froggychips/Froggy/issues/63) — audit log freeze/unfreeze операций.** Structured JSON-line audit-trail с retention'ом (30 дней по аналогии с `FROGGY_SRE_MAX_AGE_DAYS`). Нужен для post-mortem «почему мой VS Code завис в субботу». Новая CLI команда `froggy audit`. Effort: 5-6 ч.
+- [x] **[#62](https://github.com/froggychips/Froggy/issues/62) — IPC peer auth через `getpeereid`.** + `LOCAL_PEERPID` для audit-trail'а первой команды соединения. Same-uid trust boundary документирован в SECURITY.md как остающаяся слабость. _Closed: `e8ae5c2` (effort 1.5ч)._
+- [x] **[#63](https://github.com/froggychips/Froggy/issues/63) — audit log freeze/unfreeze операций.** JSON-line writer в `~/Library/Application Support/Froggy/audit/audit-YYYY-MM-DD.log`, daily rotation, retention 30 дней. Новая CLI команда `froggy audit [--limit N] [--day YYYY-MM-DD]`. _Closed: `40c9bad` (effort 2.5ч)._
 
 ## Что НЕ в этом списке
 
@@ -45,18 +46,12 @@ rationale.
 - **cgroups для MLX worker'а** — на macOS их нет.
 - **SwiftLint config** — `strictConcurrency + ExistentialAny` в `swiftSettings` сильнее (CONTRIBUTING это требует).
 
-## Приоритезация
-
-При снятии freeze'а (после 2026-05-16) разумный порядок:
-
-1. **#57 apiVersion** — самый дешёвый и закрывает целую категорию проблем рассинхрона. Делать первым.
-2. **#62 IPC peer auth** — security hardening, изолированный change, low risk.
-3. **#58 WorkerSupervisor refactor** — освобождает codebase от копипасты перед добавлением новых supervised processes.
-4. **#64 Coordinator state machine** — упрощает диагностику последующих фич.
-5. **#63 Audit log** — пригождается всем кто читает audit'ом #58 и #64.
-6. **#59 + #60 + #61** — OCR pipeline triplet. Делать вместе или последовательно. Самые «творческие» — оставить на конец, когда базовая дисциплина (#57–#64) на месте.
-
 ## История
 
-- 2026-05-11 — список заведён, 8 issues открыты во время первой volna iter2 PR'ов.
-- 2026-05-16 — ожидаемое окончание freeze'а; пункты переходят в активное TODO.
+- 2026-05-11 — список заведён, 7 issues открыты во время первой volna iter2 PR'ов.
+- 2026-05-10 — freeze на `Sources/**` снят явным решением user'а (раньше чем планировалось).
+- 2026-05-17 — все 7 issues закрыты за один день, выпущены v0.5.0 (1ef8e2f) и v0.5.1 (ec9c578).
+  Faktический effort 14ч против оценённых 28-31ч (estimates закладывали human context-switching).
+
+Приоритезация исполнения совпала с предложенной в этом документе:
+#57 → #62 → #58 → #64 → #63 → #59 → (v0.5.0 release) → #60 → #61 → (v0.5.1 release).

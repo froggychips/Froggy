@@ -308,11 +308,18 @@ public actor AudioSupervisor {
             mScope: AudioObjectPropertyScope(kAudioObjectPropertyScopeGlobal),
             mElement: AudioObjectPropertyElement(kAudioObjectPropertyElementMain)
         )
-        var name: CFString = "" as CFString
-        var nameSize = UInt32(MemoryLayout<CFString>.size)
-        guard AudioObjectGetPropertyData(deviceID, &nameProp, 0, nil, &nameSize, &name) == noErr else {
+        // CoreAudio для CFString properties отдаёт retained CF-object'ы
+        // (см. AudioHardware.h: DeviceNameCFString → +1 retain). Передача
+        // `&CFString` вместо `&Unmanaged<CFString>` ломает ARC bridging
+        // (warning: «forming UnsafeMutableRawPointer to variable of type
+        // CFString») — память overwrite'ит object reference без правильного
+        // retain/release цикла. Канонический паттерн — Unmanaged + takeRetainedValue.
+        var name: Unmanaged<CFString>?
+        var nameSize = UInt32(MemoryLayout<Unmanaged<CFString>?>.size)
+        guard AudioObjectGetPropertyData(deviceID, &nameProp, 0, nil, &nameSize, &name) == noErr,
+              let cfName = name?.takeRetainedValue() else {
             return nil
         }
-        return name as String
+        return cfName as String
     }
 }
