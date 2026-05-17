@@ -22,6 +22,15 @@ public actor VisionActor {
 
     private var isCapturing = false
     private var lastDigest: FrameDigest?
+    /// Issue #60: семантический дедуп. Pixel-fingerprint (`FrameDigest`)
+    /// пропускает только визуально идентичные кадры — но если экран
+    /// «дышит» (мигающий курсор, прогрессбар, видео в углу), digest
+    /// меняется и OCR гоняется заново на тех же самых строках. Здесь
+    /// храним последний normalized OCR-output (`sorted+trim+join`) и
+    /// сравниваем строкой — equal значит «контент тот же», pushing в
+    /// ContextStore пропускается.
+    /// nil — ещё не было OCR cycle'а или предыдущий результат был пустым.
+    private var lastOCRNormalized: String?
     private let stateFilePath: URL
     /// Base `captureInterval` из конфига. Pacer фактически использует
     /// `currentInterval`, которое = base × pressure multiplier (issue #59).
@@ -258,8 +267,46 @@ public actor VisionActor {
         let strings = await Self.recognizeText(image: image)
         let redacted = redactor.redact(strings)
         ocrChars = redacted.reduce(0) { $0 + $1.count }
+
+        // Issue #60: semantic OCR-diff поверх pixel digest'а. Pixel меняется
+        // от анимаций — но если набор строк тот же, что прошлый кадр, нет
+        // смысла обновлять ContextStore (это съест место в sliding window
+        // под уникальные экраны).
+        let normalized = Self.normalizeForSemanticDiff(redacted)
+        if !normalized.isEmpty, normalized == lastOCRNormalized {
+            Self.signposter.emitEvent("ocrSemanticSkip", id: .exclusive)
+            skipped = true
+            return
+        }
+        lastOCRNormalized = normalized
+
         await writeState(strings: redacted)
         await contextStore?.push(lines: redacted)
+    }
+
+    /// Issue #60 normalization: trim + drop empty + sort + join.
+    /// Sort нужен потому что Vision OCR может выдать строки в разном
+    /// порядке для визуально одинаковых кадров (например, после re-layout'а).
+    nonisolated static func normalizeForSemanticDiff(_ lines: [String]) -> String {
+        let trimmed = lines
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+        return trimmed.sorted().joined(separator: "\n")
+    }
+
+    /// Тестовый seam для #60: прогоняет post-OCR pipeline (redact + semantic
+    /// dedup + push) на готовом массиве строк. Возвращает true если push
+    /// произошёл, false если skipped. Без реального SCStream и Vision.
+    @discardableResult
+    func _testProcessOCRResult(_ strings: [String]) async -> Bool {
+        let redacted = redactor.redact(strings)
+        let normalized = Self.normalizeForSemanticDiff(redacted)
+        if !normalized.isEmpty, normalized == lastOCRNormalized {
+            return false
+        }
+        lastOCRNormalized = normalized
+        await contextStore?.push(lines: redacted)
+        return true
     }
 
     // MARK: - OCR
