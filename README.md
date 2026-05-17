@@ -26,6 +26,14 @@ daemon, so you can drive it from any language.
 📬 Contact: [@froggychips](https://t.me/froggychips) on Telegram
 📜 License: [MIT](LICENSE)
 
+## Why this exists
+
+**Why not just Ollama / LM Studio?** Those are fine if you have RAM to spare. Froggy is for the case where you don't — it watches `dispatch_source_memorypressure` in real time and freezes background apps (Slack, Spotify, Discord) with `SIGSTOP` + forced pageout so the LLM stops fighting them for unified memory. You can also run Froggy *alongside* Ollama as a memory-only daemon (no model loaded, ~50 MB footprint). Details: [FAQ → My Mac slows down when I run Ollama](docs/FAQ.md#my-mac-slows-down-when-i-run-ollama-will-froggy-help) and [FAQ → Can I use Froggy with Ollama?](docs/FAQ.md#can-i-use-froggy-with-ollama).
+
+**Why screen-OCR?** Most local-LLM workflows force you to copy-paste what you're looking at into a prompt. Froggy captures the screen every 2 s, runs Vision OCR on-device, redacts secrets before anything hits disk, and keeps the last 30 snapshots in memory — so the model can answer *"what's open right now?"* or *"summarise the last call"* without you typing it in. Nothing leaves the machine. Not a Rewind/Granola competitor: 30 snapshots in RAM, not months on disk — see [FAQ → How is this different from Rewind / Granola / Pi?](docs/FAQ.md#how-is-this-different-from-rewind--granola--pi).
+
+For the longer-form *"is this for me?"* answer, read [POSITIONING.md](docs/POSITIONING.md).
+
 ## Ecosystem
 
 | Companion | What it adds |
