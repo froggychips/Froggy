@@ -21,8 +21,11 @@ public enum AudioSupervisorError: Error, Sendable, CustomStringConvertible {
 }
 
 /// Управляет жизненным циклом FroggyAudioWorker subprocess'а.
-/// Паттерн — зеркало MLXSupervisor: spawn/kill через Process,
-/// JSON-line stdin/stdout, crash isolation через subprocess boundary.
+/// Pipe-lifecycle (spawn/Process/stdin/stdout/waitForExit/terminationHandler
+/// race-guard) делегирован `WorkerProcessHost` — общий с `MLXSupervisor`
+/// (issue #58). Здесь — audio-специфика: декодинг событий, CheckedContinuation
+/// pending-requests (вместо AsyncThrowingStream у MLX), subscribers
+/// для streaming transcript'а, sessionStore.
 public actor AudioSupervisor {
     private static let log = Logger(subsystem: "com.froggychips.froggy", category: "audio-supervisor")
 
@@ -33,9 +36,23 @@ public actor AudioSupervisor {
     }
 
     private let workerURL: URL
-    private var process: Process?
-    private var stdinHandle: FileHandle?
-    private var stdoutBuffer = Data()
+    private let pidStore: FrozenPidsStore?
+    /// Pipe-lifecycle (issue #58). Lazy по той же причине что и в MLXSupervisor —
+    /// Swift 6 запрещает `[weak self]` capture в actor init.
+    private lazy var host: WorkerProcessHost = WorkerProcessHost(
+        workerURL: workerURL,
+        args: [],
+        log: Self.log,
+        pidStore: pidStore,
+        onLine: { [weak self] line in
+            guard let self else { return }
+            Task { await self.handleLine(line) }
+        },
+        onExit: { [weak self] pid, status in
+            guard let self else { return }
+            Task { await self.handleWorkerExit(pid: pid, status: status) }
+        }
+    )
     private var pendingRequests: [String: CheckedContinuation<Void, any Error>] = [:]
     private var subscribers: [UUID: AsyncStream<TranscriptEvent>.Continuation] = [:]
     private var capturing = false
@@ -44,8 +61,15 @@ public actor AudioSupervisor {
     /// Issue #57: once-per-spawn wire-version warning (см. MLXSupervisor).
     private var wireVersionMismatchLogged = false
 
-    public init(workerExecutableURL: URL? = nil) {
+    /// Issue #58 acceptance: pidStore прокидывается в host, чтобы audio worker
+    /// тоже регистрировался под `categoryWorker` и попадал в boot-recovery
+    /// наравне с MLX worker'ом.
+    public init(
+        workerExecutableURL: URL? = nil,
+        pidStore: FrozenPidsStore? = nil
+    ) {
         self.workerURL = workerExecutableURL ?? Self.defaultWorkerURL()
+        self.pidStore = pidStore
     }
 
     public static func defaultWorkerURL() -> URL {
@@ -137,75 +161,46 @@ public actor AudioSupervisor {
         Self.log.notice("audio capture stopped")
     }
 
-    /// Полное завершение: stopCapture + shutdown worker'а.
+    /// Полное завершение: shutdown worker'а + ожидание exit'а + SIGKILL fallback.
+    /// Симметрично `MLXSupervisor.unloadModel`.
     public func shutdown() async {
-        guard let p = process else { return }
+        guard host.currentPid() != nil else { return }
         try? sendCommand(.init(cmd: AudioWorkerCommand.shutdown, requestId: UUID().uuidString))
-        let exited = await Self.waitForExit(p, timeout: .seconds(3))
-        if !exited { kill(p.processIdentifier, SIGKILL) }
+        let exited = await host.waitForExit(timeout: .seconds(3))
+        if !exited {
+            await host.sigkill()
+        }
         cleanup()
     }
 
     // MARK: - Worker spawn
 
     private func ensureWorkerSpawned() throws {
-        if let p = process, p.isRunning { return }
-        cleanup()
-
-        guard FileManager.default.isExecutableFile(atPath: workerURL.path) else {
-            throw AudioSupervisorError.workerNotFound(workerURL.path)
-        }
-
-        let proc = Process()
-        proc.executableURL = workerURL
-        proc.arguments = []
-        let stdinPipe  = Pipe()
-        let stdoutPipe = Pipe()
-        proc.standardInput  = stdinPipe
-        proc.standardOutput = stdoutPipe
-        proc.standardError  = FileHandle.standardError
-
-        let bridge = ReadBridge { [weak self] data in
-            Task { await self?.feedStdout(data) }
-        }
-        stdoutPipe.fileHandleForReading.readabilityHandler = { fh in
-            bridge.receive(fh.availableData)
-        }
-        proc.terminationHandler = { p in
-            let pid = p.processIdentifier
-            let status = p.terminationStatus
-            Task { [weak self] in await self?.handleWorkerExit(pid: pid, status: status) }
-        }
         do {
-            try proc.run()
+            try host.ensureSpawned()
+        } catch WorkerProcessHost.WorkerProcessError.workerNotFound(let p) {
+            throw AudioSupervisorError.workerNotFound(p)
+        } catch WorkerProcessHost.WorkerProcessError.spawnFailed(let r) {
+            throw AudioSupervisorError.workerSpawnFailed(r)
         } catch {
             throw AudioSupervisorError.workerSpawnFailed(error.localizedDescription)
         }
-        process = proc
-        stdinHandle = stdinPipe.fileHandleForWriting
-        Self.log.notice("audio worker spawned pid=\(proc.processIdentifier)")
     }
 
     // MARK: - stdin/stdout
 
     private func sendCommand(_ cmd: AudioWorkerCommand) throws {
-        guard let stdin = stdinHandle else { throw AudioSupervisorError.workerCrashed }
-        var data = try JSONEncoder().encode(cmd)
-        data.append(0x0A)
-        stdin.write(data)
+        let data = try JSONEncoder().encode(cmd)
+        do {
+            try host.write(data)
+        } catch {
+            throw AudioSupervisorError.workerCrashed
+        }
     }
 
-    private func feedStdout(_ data: Data) {
-        guard !data.isEmpty else { return }
-        stdoutBuffer.append(data)
-        while let nl = stdoutBuffer.firstIndex(of: 0x0A) {
-            let endOffset = stdoutBuffer.distance(from: stdoutBuffer.startIndex, to: nl)
-            let line = Data(stdoutBuffer.prefix(endOffset))
-            stdoutBuffer.removeSubrange(stdoutBuffer.startIndex...nl)
-            if let event = try? JSONDecoder().decode(AudioWorkerEvent.self, from: line) {
-                deliverEvent(event)
-            }
-        }
+    private func handleLine(_ line: Data) {
+        guard let event = try? JSONDecoder().decode(AudioWorkerEvent.self, from: line) else { return }
+        deliverEvent(event)
     }
 
     private func deliverEvent(_ event: AudioWorkerEvent) {
@@ -251,8 +246,17 @@ public actor AudioSupervisor {
 
     // MARK: - Exit handling
 
+    /// Race-guard: см. развёрнутый комментарий в `MLXSupervisor.handleWorkerExit`.
     private func handleWorkerExit(pid: Int32, status: Int32) {
-        guard process?.processIdentifier == pid else { return }
+        let currentPid = host.currentPid()
+        guard currentPid == nil || currentPid == pid else {
+            Self.log.notice("ignoring stale audio exit pid=\(pid) current=\(currentPid ?? 0)")
+            return
+        }
+        if currentPid == nil {
+            Self.log.info("audio worker exit post-cleanup pid=\(pid) status=\(status)")
+            return
+        }
         Self.log.warning("audio worker exited pid=\(pid) status=\(status)")
         for (_, cont) in pendingRequests {
             cont.resume(throwing: AudioSupervisorError.workerCrashed)
@@ -264,20 +268,15 @@ public actor AudioSupervisor {
         pendingRequests.removeAll()
         for cont in subscribers.values { cont.finish() }
         subscribers.removeAll()
-        stdoutBuffer.removeAll()
-        try? stdinHandle?.close()
-        stdinHandle = nil
-        process = nil
         capturing = false
-        // Issue #57: следующий spawn — другой бинарь, другой мог отстать.
+        // Issue #57: следующий spawn — другой бинарь, мог отстать.
         wireVersionMismatchLogged = false
+        host.cleanup()
         if let store = sessionStore {
             Task { await store.close() }
             sessionStore = nil
         }
     }
-
-    // MARK: - Utilities
 
     // MARK: - Audio device info (nonisolated, CoreAudio query)
 
@@ -315,41 +314,5 @@ public actor AudioSupervisor {
             return nil
         }
         return name as String
-    }
-
-    private static func waitForExit(_ proc: Process, timeout: Duration) async -> Bool {
-        let pid = proc.processIdentifier
-        guard pid > 0 else { return true }
-        return await withCheckedContinuation { (cont: CheckedContinuation<Bool, Never>) in
-            let resolver = OneShotBoolResolver(continuation: cont)
-            let queue = DispatchQueue.global(qos: .userInitiated)
-            let src = DispatchSource.makeProcessSource(identifier: pid, eventMask: .exit, queue: queue)
-            src.setEventHandler { src.cancel(); resolver.resolve(true) }
-            src.activate()
-            if !proc.isRunning { src.cancel(); resolver.resolve(true); return }
-            let nanos = UInt64(timeout.components.seconds) * 1_000_000_000
-                + UInt64(timeout.components.attoseconds / 1_000_000_000)
-            queue.asyncAfter(deadline: .now() + .nanoseconds(Int(nanos))) {
-                src.cancel(); resolver.resolve(false)
-            }
-        }
-    }
-}
-
-private final class ReadBridge: @unchecked Sendable {
-    private let callback: @Sendable (Data) -> Void
-    init(_ callback: @escaping @Sendable (Data) -> Void) { self.callback = callback }
-    func receive(_ data: Data) { callback(data) }
-}
-
-private final class OneShotBoolResolver: @unchecked Sendable {
-    private let lock = NSLock()
-    private var resolved = false
-    private let continuation: CheckedContinuation<Bool, Never>
-    init(continuation: CheckedContinuation<Bool, Never>) { self.continuation = continuation }
-    func resolve(_ value: Bool) {
-        lock.lock(); let was = resolved; if !was { resolved = true }; lock.unlock()
-        guard !was else { return }
-        continuation.resume(returning: value)
     }
 }

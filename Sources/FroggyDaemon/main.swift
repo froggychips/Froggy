@@ -77,7 +77,10 @@ struct FroggyDaemon {
         _ = freezeStats // ipc-handler ссылается отдельно
         let vortex = VortexActor(pidStore: pidStore, pageout: pageoutChain, ranker: ranker)
         let audioWorkerURL = config.audioWorkerPath.map { URL(fileURLWithPath: $0) }
-        let audioSupervisor = AudioSupervisor(workerExecutableURL: audioWorkerURL)
+        // Issue #58: audio worker тоже регистрируется в FrozenPidsStore под
+        // `categoryWorker`, чтобы boot-recovery подбирал его сирот после
+        // крах daemon'а (раньше boot-recovery работал только для MLX worker'а).
+        let audioSupervisor = AudioSupervisor(workerExecutableURL: audioWorkerURL, pidStore: pidStore)
 
         let workerURL = config.mlxWorkerPath.map { URL(fileURLWithPath: $0) }
         let mlx = MLXSupervisor(

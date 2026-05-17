@@ -34,6 +34,11 @@ public enum MLXSupervisorError: Error, Sendable, CustomStringConvertible {
 /// убивает worker — это единственный надёжный способ вернуть peak unified
 /// memory ядру (см. ADR 0008). На крах worker'а — текущие операции
 /// получают `.workerCrashed`, `isLoaded()` сбрасывается.
+///
+/// Issue #58: pipe-lifecycle (spawn/Process/stdin/stdout/waitForExit/
+/// terminationHandler race-guard) делегирован `WorkerProcessHost`.
+/// Здесь — только MLX-специфика: декодинг событий, AsyncThrowingStream
+/// pending-requests by requestId, public surface area.
 public actor MLXSupervisor {
     private static let log = Logger(subsystem: "com.froggychips.froggy", category: "mlx-supervisor")
     private static let signposter = OSSignposter(subsystem: "com.froggychips.froggy", category: "mlx-supervisor")
@@ -52,10 +57,26 @@ public actor MLXSupervisor {
     /// `crash-on-generate`.
     private let extraArgs: [String]
 
-    private var process: Process?
-    private var stdinHandle: FileHandle?
+    /// Pipe-lifecycle (issue #58). Lazy чтобы захватить `self` в callback'ах —
+    /// `[weak self]` capture в actor init напрямую запрещён Swift 6
+    /// (cannot access stored property here in nonisolated initializer).
+    /// Lazy откладывает создание до первого доступа, к моменту которого
+    /// init уже завершён и self полностью валиден.
+    private lazy var host: WorkerProcessHost = WorkerProcessHost(
+        workerURL: workerURL,
+        args: ["--kv-bits", String(kvCacheBits)] + extraArgs,
+        log: Self.log,
+        pidStore: pidStore,
+        onLine: { [weak self] line in
+            guard let self else { return }
+            Task { await self.handleLine(line) }
+        },
+        onExit: { [weak self] pid, status in
+            guard let self else { return }
+            Task { await self.handleWorkerExit(pid: pid, status: status) }
+        }
+    )
     private var loadedPath: String?
-    private var stdoutBuffer = Data()
     private var pendingRequests: [String: AsyncThrowingStream<MLXWorkerEvent, any Error>.Continuation] = [:]
     /// Issue #57: warning о версии wire-протокола логируется один раз на
     /// жизнь supervisor'а (т.е. одно лог-сообщение на spawn worker'а),
@@ -122,20 +143,16 @@ public actor MLXSupervisor {
     /// Graceful shutdown: shutdown-команда → ждём exit kernel-сигналом
     /// до 3 секунд → SIGKILL.
     ///
-    /// История: сначала был withTaskGroup'овый wait через AsyncThrowingStream
-    /// goodbye-event'а — но stream без `goodbye` никогда не finish'ится, и
-    /// ветка `for try await` в group'е продолжала висеть после `cancelAll()`.
-    /// Заменили на polling `process.isRunning` с шагом 100мс — работало, но
-    /// гонка: между `!p.isRunning` и `kill()` процесс мог зомбифицироваться,
-    /// или наоборот polling «промахивался» по короткоживущему окну, и мы
-    /// зря ждали до конца timeout'а. Теперь — `DispatchSource.makeProcessSource(.exit)`,
-    /// kernel-level kqueue NOTE_EXIT, без timer'ов и без race на чтении
-    /// `p.isRunning`.
+    /// История: были варианты с polling `process.isRunning` и withTaskGroup'ом
+    /// поверх AsyncThrowingStream goodbye-event'а — оба имели race-условия
+    /// (zombification window, либо вечный hang на stream без `goodbye`).
+    /// Финальная реализация — `DispatchSource.makeProcessSource(.exit)`
+    /// внутри `WorkerProcessHost.waitForExit`, kernel-level kqueue NOTE_EXIT
+    /// без timer'ов и без race на чтении `isRunning`. См. WorkerProcessHost.
     public func unloadModel() async {
-        guard let p = process else { return }
+        guard let workerPid = host.currentPid() else { return }
 
         // POI: от shutdown-сигнала до full reap'а worker'а.
-        let workerPid = p.processIdentifier
         let poiId = Self.poi.makeSignpostID()
         let poiState = Self.poi.beginInterval("mlx_unload", id: poiId, "pid=\(workerPid)")
         var graceful = false
@@ -149,81 +166,13 @@ public actor MLXSupervisor {
 
         try? sendCommand(.init(cmd: MLXWorkerCommand.shutdown, requestId: UUID().uuidString))
 
-        let exited = await Self.waitForExit(p, timeout: .seconds(3))
+        let exited = await host.waitForExit(timeout: .seconds(3))
         if !exited {
-            kill(p.processIdentifier, SIGKILL)
-            // SIGKILL гарантирован kernel'ом, но `waitUntilExit` нужен чтобы
-            // дождаться reaping zombie'я и termination handler'а Process'a.
-            await Self.waitForReap(p)
+            await host.sigkill()
         } else {
             graceful = true
         }
         cleanup(reason: "unload")
-    }
-
-    /// Реактивное ожидание exit'а worker'а через `DispatchSource(.exit)`.
-    /// Возвращает `true` если процесс exit'нулся в пределах timeout'а,
-    /// `false` если timeout сработал раньше.
-    ///
-    /// Race-условие: процесс может exit'нуться между `proc.run()` и моментом
-    /// когда мы создаём DispatchSource — kqueue не доставит уже пропущенный
-    /// NOTE_EXIT. Закрываем явной проверкой `isRunning` после `activate()`.
-    /// Если уже не running — резолвим continuation сразу.
-    ///
-    /// Continuation вызывается ровно один раз — guard через `OneShotResolver`
-    /// (NSLock внутри), иначе и event-handler, и timeout-handler могут оба
-    /// попытаться резолвить.
-    private static func waitForExit(_ proc: Process, timeout: Duration) async -> Bool {
-        // Снимаем pid синхронно — `Process` не Sendable, в @Sendable handler'ы
-        // DispatchSource его передавать нельзя; pid (Int32) — Sendable.
-        let pid = proc.processIdentifier
-
-        // pid <= 0 — процесс не стартовал или уже reap'нут. Считаем, что exit'нулся.
-        guard pid > 0 else { return true }
-
-        return await withCheckedContinuation { (cont: CheckedContinuation<Bool, Never>) in
-            let resolver = OneShotResolver(continuation: cont)
-            let queue = DispatchQueue.global(qos: .userInitiated)
-
-            let src = DispatchSource.makeProcessSource(
-                identifier: pid,
-                eventMask: .exit,
-                queue: queue
-            )
-            src.setEventHandler {
-                src.cancel()
-                resolver.resolve(true)
-            }
-            src.activate()
-
-            // Race-guard: процесс мог exit'нуться до того, как kqueue его взял
-            // под наблюдение. NOTE_EXIT уже не придёт — проверяем вручную.
-            // `isRunning` тут безопасно: handler'ы ещё не escape'нули, мы в
-            // том же synchronous flow что и withCheckedContinuation closure.
-            if !proc.isRunning {
-                src.cancel()
-                resolver.resolve(true)
-                return
-            }
-
-            // Timeout: cancel'им source и резолвим false. resolver гарантирует,
-            // что если NOTE_EXIT уже сработал, мы не перезапишем результат.
-            let nanos = UInt64(timeout.components.seconds) * 1_000_000_000
-                + UInt64(timeout.components.attoseconds / 1_000_000_000)
-            queue.asyncAfter(deadline: .now() + .nanoseconds(Int(nanos))) {
-                src.cancel()
-                resolver.resolve(false)
-            }
-        }
-    }
-
-    /// После SIGKILL kernel убьёт процесс почти мгновенно, но `Process` ещё
-    /// не reap'нул zombie'я и не вызвал termination handler. Делаем второй
-    /// `waitForExit` без timeout-зависимости — pid точно exit'нется.
-    private static func waitForReap(_ proc: Process) async {
-        // SIGKILL → exit максимум за 1с, иначе что-то совсем сломано — но
-        // даже с timeout'ом cleanup'у безопасно продолжать (kill уже отправлен).
-        _ = await waitForExit(proc, timeout: .seconds(1))
     }
 
     public func isLoaded() -> Bool { loadedPath != nil }
@@ -232,7 +181,7 @@ public actor MLXSupervisor {
 
     /// Worker pid — нужен `FrozenPidsStore` recovery, чтобы убрать сирот.
     public func currentWorkerPid() -> Int32? {
-        process?.processIdentifier
+        host.currentPid()
     }
 
     public func generate(prompt: String, maxTokens: Int = 200) async throws -> String {
@@ -334,57 +283,24 @@ public actor MLXSupervisor {
     }
 
     private func ensureWorkerSpawned() throws {
-        if let p = process, p.isRunning { return }
-        cleanup(reason: "respawn")
-
-        guard FileManager.default.isExecutableFile(atPath: workerURL.path) else {
-            throw MLXSupervisorError.workerNotFound(workerURL.path)
-        }
-
-        let proc = Process()
-        proc.executableURL = workerURL
-        proc.arguments = ["--kv-bits", String(kvCacheBits)] + extraArgs
-        let stdinPipe = Pipe()
-        let stdoutPipe = Pipe()
-        proc.standardInput = stdinPipe
-        proc.standardOutput = stdoutPipe
-        proc.standardError = FileHandle.standardError
-
-        // readabilityHandler доставит data в наш actor через nonisolated bridge.
-        let bridge = ReadBridge { [weak self] data in
-            Task { await self?.feedStdout(data) }
-        }
-        stdoutPipe.fileHandleForReading.readabilityHandler = { fh in
-            bridge.receive(fh.availableData)
-        }
-        proc.terminationHandler = { p in
-            let pid = p.processIdentifier
-            let status = p.terminationStatus
-            Task { [weak self] in await self?.handleWorkerExit(pid: pid, status: status) }
-        }
         do {
-            try proc.run()
+            try host.ensureSpawned()
+        } catch WorkerProcessHost.WorkerProcessError.workerNotFound(let p) {
+            throw MLXSupervisorError.workerNotFound(p)
+        } catch WorkerProcessHost.WorkerProcessError.spawnFailed(let r) {
+            throw MLXSupervisorError.workerSpawnFailed(r)
         } catch {
             throw MLXSupervisorError.workerSpawnFailed(error.localizedDescription)
-        }
-        process = proc
-        stdinHandle = stdinPipe.fileHandleForWriting
-        Self.log.notice("worker spawned pid=\(proc.processIdentifier)")
-
-        // Регистрируем pid в frozen.pids — на случай крах демона worker'а
-        // отстреливаем boot-recovery'ем.
-        if let pidStore {
-            let pid = proc.processIdentifier
-            let path = workerURL.path
-            Task { await pidStore.add(.init(pid: pid, executablePath: path, category: FrozenPidsStore.categoryWorker)) }
         }
     }
 
     private func sendCommand(_ cmd: MLXWorkerCommand) throws {
-        guard let stdin = stdinHandle else { throw MLXSupervisorError.workerCrashed }
-        var data = try JSONEncoder().encode(cmd)
-        data.append(0x0A)
-        stdin.write(data)
+        let data = try JSONEncoder().encode(cmd)
+        do {
+            try host.write(data)
+        } catch {
+            throw MLXSupervisorError.workerCrashed
+        }
     }
 
     private func registerRequest(id: String) -> AsyncThrowingStream<MLXWorkerEvent, any Error> {
@@ -393,18 +309,10 @@ public actor MLXSupervisor {
         }
     }
 
-    /// Вызывается из nonisolated bridge при поступлении данных из stdout worker'а.
-    private func feedStdout(_ data: Data) {
-        guard !data.isEmpty else { return }
-        stdoutBuffer.append(data)
-        while let nl = stdoutBuffer.firstIndex(of: 0x0A) {
-            let endOffset = stdoutBuffer.distance(from: stdoutBuffer.startIndex, to: nl)
-            let line = Data(stdoutBuffer.prefix(endOffset))
-            stdoutBuffer.removeSubrange(stdoutBuffer.startIndex...nl)
-            if let event = try? JSONDecoder().decode(MLXWorkerEvent.self, from: line) {
-                deliverEvent(event)
-            }
-        }
+    /// Вызывается из `WorkerProcessHost.onLine` для каждой полной строки stdout'а.
+    private func handleLine(_ line: Data) {
+        guard let event = try? JSONDecoder().decode(MLXWorkerEvent.self, from: line) else { return }
+        deliverEvent(event)
     }
 
     private func deliverEvent(_ event: MLXWorkerEvent) {
@@ -432,19 +340,29 @@ public actor MLXSupervisor {
         }
     }
 
+    /// Host фильтрует terminationHandler-arrival через generation-counter,
+    /// но это не покрывает второй race: onExit→Task ждёт в actor queue,
+    /// и за это время может выполниться следующий `loadModel` который
+    /// уже spawn'нул новый worker. К моменту handleWorkerExit состояние
+    /// supervisor'а уже принадлежит новому процессу — cleanup убил бы
+    /// pending requests, относящиеся к НЕМУ. Гасим двумя guard-ветками:
+    /// * currentPid == nil — `unloadModel` уже сам сделал cleanup, мы здесь
+    ///   как post-mortem notification, делать ничего не надо.
+    /// * currentPid == newPid (≠ pid) — старый exit, новый процесс уже работает.
     private func handleWorkerExit(pid: Int32, status: Int32) async {
-        // Issue #57: новый worker может иметь другую wire-version. Сбрасываем
-        // флаг, чтобы первый mismatch на следующем spawn'е снова залогировался.
-        wireVersionMismatchLogged = false
-        // Race-guard: terminationHandler от старого процесса может прийти
-        // ПОСЛЕ того, как `unloadModel` уже сделал cleanup и `loadModel`
-        // успел spawn'нуть новый worker. В этом случае `process?.processIdentifier`
-        // — pid нового, и cleanup'ить его pendingRequests нельзя.
-        guard let currentPid = process?.processIdentifier, currentPid == pid else {
-            Self.log.notice("ignoring stale terminationHandler pid=\(pid) status=\(status)")
+        let currentPid = host.currentPid()
+        guard currentPid == nil || currentPid == pid else {
+            Self.log.notice("ignoring stale exit pid=\(pid) current=\(currentPid ?? 0)")
+            return
+        }
+        if currentPid == nil {
+            Self.log.info("worker exit post-cleanup pid=\(pid) status=\(status)")
             return
         }
         Self.log.warning("worker exited pid=\(pid) status=\(status)")
+        // Issue #57: новый worker может иметь другую wire-version. Сбрасываем
+        // флаг, чтобы первый mismatch на следующем spawn'е снова залогировался.
+        wireVersionMismatchLogged = false
         cleanup(reason: "exit")
     }
 
@@ -453,46 +371,7 @@ public actor MLXSupervisor {
             cont.finish(throwing: MLXSupervisorError.workerCrashed)
         }
         pendingRequests.removeAll()
-        stdoutBuffer.removeAll()
-        try? stdinHandle?.close()
-        stdinHandle = nil
-        if let pid = process?.processIdentifier, let pidStore {
-            Task { await pidStore.remove(pid: pid) }
-        }
-        process = nil
+        host.cleanup()
         loadedPath = nil
-    }
-}
-
-/// Маленький мост из nonisolated readabilityHandler в actor через @Sendable
-/// closure. Хранит callback и не имеет состояния.
-private final class ReadBridge: @unchecked Sendable {
-    private let callback: @Sendable (Data) -> Void
-    init(_ callback: @escaping @Sendable (Data) -> Void) {
-        self.callback = callback
-    }
-    func receive(_ data: Data) { callback(data) }
-}
-
-/// Гарантирует, что `CheckedContinuation` будет резолвлен ровно один раз.
-/// `DispatchSource(.exit)` event-handler и timeout-handler оба гонятся за
-/// resolve'ом — кто первый, тот и записывает результат. Двойной resume
-/// `CheckedContinuation` — это runtime-trap, поэтому guard обязателен.
-private final class OneShotResolver: @unchecked Sendable {
-    private let lock = NSLock()
-    private var resolved = false
-    private let continuation: CheckedContinuation<Bool, Never>
-
-    init(continuation: CheckedContinuation<Bool, Never>) {
-        self.continuation = continuation
-    }
-
-    func resolve(_ value: Bool) {
-        lock.lock()
-        let wasResolved = resolved
-        if !wasResolved { resolved = true }
-        lock.unlock()
-        guard !wasResolved else { return }
-        continuation.resume(returning: value)
     }
 }
