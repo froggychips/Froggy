@@ -82,6 +82,17 @@ public actor MLXSupervisor {
     /// жизнь supervisor'а (т.е. одно лог-сообщение на spawn worker'а),
     /// чтобы не флудить лог per-event. Reset'ится при handleWorkerExit.
     private var wireVersionMismatchLogged = false
+    /// Issue #64: флаг устанавливается `unloadModel` перед отправкой
+    /// shutdown-команды и сбрасывается после `cleanup`. `handleWorkerExit`
+    /// читает его, чтобы отличить «мы сами попросили worker уйти» от
+    /// «worker умер сам / был убит извне». Crash observer'ы дёргаются
+    /// только во втором случае.
+    private var expectedExit = false
+    /// Issue #64: внешние наблюдатели за **неожиданным** exit'ом worker'а.
+    /// Используется `VortexCoordinator` для перехода в `.degraded`.
+    /// Не вызываются при graceful `unloadModel`.
+    public typealias CrashObserver = @Sendable (_ pid: Int32, _ status: Int32) -> Void
+    private var crashObservers: [CrashObserver] = []
 
     public init(
         memoryLimitBytes: Int? = nil,
@@ -164,6 +175,10 @@ public actor MLXSupervisor {
             )
         }
 
+        // Issue #64: помечаем exit как ожидаемый ДО отправки shutdown'а,
+        // чтобы handleWorkerExit не сдёрнул crash observer'ов на
+        // нормальный unload-сценарий.
+        expectedExit = true
         try? sendCommand(.init(cmd: MLXWorkerCommand.shutdown, requestId: UUID().uuidString))
 
         let exited = await host.waitForExit(timeout: .seconds(3))
@@ -173,6 +188,13 @@ public actor MLXSupervisor {
             graceful = true
         }
         cleanup(reason: "unload")
+    }
+
+    /// Issue #64: подписка на unexpected exit'ы worker'а. Не вызывается при
+    /// нормальном `unloadModel`. Coordinator использует это для перехода
+    /// в `.degraded`.
+    public func addCrashObserver(_ observer: @escaping CrashObserver) {
+        crashObservers.append(observer)
     }
 
     public func isLoaded() -> Bool { loadedPath != nil }
@@ -363,7 +385,15 @@ public actor MLXSupervisor {
         // Issue #57: новый worker может иметь другую wire-version. Сбрасываем
         // флаг, чтобы первый mismatch на следующем spawn'е снова залогировался.
         wireVersionMismatchLogged = false
+        // Issue #64: дёргаем crash observer'ов ТОЛЬКО на неожиданном exit'е.
+        // unloadModel ставит expectedExit=true ДО shutdown'а; цикл здесь
+        // считывает флаг и обнуляет его в cleanup.
+        let wasExpected = expectedExit
         cleanup(reason: "exit")
+        if !wasExpected {
+            let observers = crashObservers
+            for obs in observers { obs(pid, status) }
+        }
     }
 
     private func cleanup(reason: String) {
@@ -373,5 +403,6 @@ public actor MLXSupervisor {
         pendingRequests.removeAll()
         host.cleanup()
         loadedPath = nil
+        expectedExit = false
     }
 }

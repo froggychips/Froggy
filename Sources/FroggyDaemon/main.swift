@@ -351,6 +351,8 @@ struct DaemonIPCHandler: IPCRequestHandler, Sendable {
             r.audioOutputDevice = AudioSupervisor.currentOutputDeviceName()
             r.audioInputDevice = AudioSupervisor.currentInputDeviceName()
             r.freezingEnabled = await coordinator.isFreezingEnabled()
+            r.coordinatorState = await coordinator.currentStateName()
+            r.coordinatorStateReason = await coordinator.currentStateReason()
             r.final = true
             return r
 

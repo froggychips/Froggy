@@ -54,18 +54,24 @@ struct FroggyCLI {
             stderr(r.error ?? "status failed")
             exit(1)
         }
-        let pairs: [(String, String)] = [
-            ("capturing",       fmt(r.capturing)),
-            ("listening",       fmt(r.listening)),
-            ("model_loaded",    fmt(r.modelLoaded)),
-            ("model_path",      r.modelPath ?? "—"),
-            ("memory_pressure", r.memoryPressure.map { "\($0)%" } ?? "—"),
-            ("frozen_procs",    r.frozen.map(String.init) ?? "—"),
-            ("snapshots",       r.snapshots.map(String.init) ?? "—"),
-            ("capture_error",   r.lastCaptureError ?? "—"),
-            ("audio_output",    r.audioOutputDevice ?? "—"),
-            ("audio_input",     r.audioInputDevice ?? "—"),
-        ]
+        // Разбито на одиночные append'ы — type-checker не вытягивает
+        // массив-literal с 10+ tuples + ?? + map + String.init за разумное
+        // время и кидает «unable to type-check this expression».
+        var pairs: [(String, String)] = []
+        pairs.append(("coord_state",     r.coordinatorState ?? "—"))
+        if r.coordinatorState == "degraded", let reason = r.coordinatorStateReason {
+            pairs.append(("degraded_reason", reason))
+        }
+        pairs.append(("capturing",       fmt(r.capturing)))
+        pairs.append(("listening",       fmt(r.listening)))
+        pairs.append(("model_loaded",    fmt(r.modelLoaded)))
+        pairs.append(("model_path",      r.modelPath ?? "—"))
+        pairs.append(("memory_pressure", r.memoryPressure.map { "\($0)%" } ?? "—"))
+        pairs.append(("frozen_procs",    r.frozen.map(String.init) ?? "—"))
+        pairs.append(("snapshots",       r.snapshots.map(String.init) ?? "—"))
+        pairs.append(("capture_error",   r.lastCaptureError ?? "—"))
+        pairs.append(("audio_output",    r.audioOutputDevice ?? "—"))
+        pairs.append(("audio_input",     r.audioInputDevice ?? "—"))
         let width = pairs.map(\.0.count).max() ?? 0
         for (k, v) in pairs {
             print("\(k.padding(toLength: width, withPad: " ", startingAt: 0))  \(v)")

@@ -75,6 +75,9 @@ public actor VortexCoordinator: WorkspaceTerminationWatcher.Sink {
     /// + thawAll, чтобы daemon уехал в idle ~50 MB без замороженных pid'ов.
     private var freezingEnabled: Bool
 
+    /// Issue #64: lifecycle-состояние. См. `CoordinatorState`.
+    private var state: CoordinatorState = .idle
+
     public init(
         mlx: MLXSupervisor,
         vortex: any VortexFreezing,
@@ -117,6 +120,13 @@ public actor VortexCoordinator: WorkspaceTerminationWatcher.Sink {
 
     public func startMonitoring() async {
         guard listenTask == nil else { return }
+        transition(to: .starting)
+        // Issue #64: crash observer на MLX. Worker умирает неожиданно
+        // (внешний kill, OOM, jetsam) → coordinator уходит в degraded.
+        // Возврат в ready — только через успешный loadModel (вручную).
+        await mlx.addCrashObserver { [weak self] pid, status in
+            Task { await self?.handleMLXCrash(pid: pid, status: status) }
+        }
         await monitor.start()
         let stream = monitor.events // nonisolated, доступ без await
         listenTask = Task { [weak self] in
@@ -143,9 +153,11 @@ public actor VortexCoordinator: WorkspaceTerminationWatcher.Sink {
                 }
             }
         }
+        transition(to: .ready)
     }
 
     public func stopMonitoring() async {
+        transition(to: .stopping)
         listenTask?.cancel()
         listenTask = nil
         workspaceTask?.cancel()
@@ -153,6 +165,7 @@ public actor VortexCoordinator: WorkspaceTerminationWatcher.Sink {
         thawTask?.cancel()
         thawTask = nil
         await monitor.stop()
+        transition(to: .idle)
     }
 
     // MARK: - Public API
@@ -164,6 +177,17 @@ public actor VortexCoordinator: WorkspaceTerminationWatcher.Sink {
         let interval = Self.signposter.beginInterval("coordinator.loadModel")
         defer { Self.signposter.endInterval("coordinator.loadModel", interval) }
 
+        // Issue #64: если были в degraded — это попытка recovery.
+        // Промежуточный recovering, конечный — ready при успехе или
+        // обратно degraded при неудаче (stuck recovery).
+        let recoveringFromDegraded: Bool
+        if case .degraded = state {
+            recoveringFromDegraded = true
+            transition(to: .recovering)
+        } else {
+            recoveringFromDegraded = false
+        }
+
         await monitor.nudge(.warning, durationSeconds: nudgeDurationSeconds)
         // Дать монитору цикл, чтобы политика прокатилась до возврата.
         await Task.yield()
@@ -172,7 +196,13 @@ public actor VortexCoordinator: WorkspaceTerminationWatcher.Sink {
             try await mlx.loadModel(modelPath: modelPath)
         } catch {
             await emergencyThaw()
+            if recoveringFromDegraded {
+                transition(to: .degraded(reason: "load_failed: \(String(describing: error))"))
+            }
             throw error
+        }
+        if recoveringFromDegraded {
+            transition(to: .ready)
         }
     }
 
@@ -183,6 +213,19 @@ public actor VortexCoordinator: WorkspaceTerminationWatcher.Sink {
 
     /// Текущее состояние master switch — для IPC `status`.
     public func isFreezingEnabled() -> Bool { freezingEnabled }
+
+    /// Issue #64: текущее состояние lifecycle. Для IPC `status` и тестов.
+    public func currentState() -> CoordinatorState { state }
+    public func currentStateName() -> String { state.name }
+    public func currentStateReason() -> String? { state.reason }
+
+    /// Issue #64 test-hook: установить degraded извне без реального MLX crash'а.
+    /// Используется юнит-тестами state machine, чтобы не таскать настоящий
+    /// MLXSupervisor с fake worker'ом. Не для прод-использования —
+    /// production-path идёт через crashObserver.
+    internal func _testSetDegraded(reason: String) {
+        transition(to: .degraded(reason: reason))
+    }
 
     /// Переключатель master switch (ADR 0017).
     /// false → cancel pending thawTask, emergencyThaw всех замороженных,
@@ -231,6 +274,30 @@ public actor VortexCoordinator: WorkspaceTerminationWatcher.Sink {
         public let tier2Frozen: [Int32]
         public let secondsInLevel: Int
         public let pageoutCounters: PageoutCounters?
+    }
+
+    // MARK: - MLX crash handling (issue #64)
+
+    private func handleMLXCrash(pid: Int32, status: Int32) {
+        Self.log.warning("mlx worker crash detected pid=\(pid, privacy: .public) status=\(status, privacy: .public) — coordinator → degraded")
+        transition(to: .degraded(reason: "mlx_crash_pid=\(pid)_status=\(status)"))
+    }
+
+    // MARK: - State transitions (issue #64)
+
+    private func transition(to new: CoordinatorState) {
+        let old = state
+        guard old != new else { return }
+        state = new
+        Self.log.info(
+            "coordinator state: \(old.name, privacy: .public) → \(new.name, privacy: .public)\(new.reason.map { " reason=\($0)" } ?? "")"
+        )
+        // Дискретный event в POI track — Instruments видит каждый transition
+        // как точечный маркер на coordinator timeline.
+        Self.poi.emitEvent(
+            "coordinator_state_change",
+            "from=\(old.name) to=\(new.name)"
+        )
     }
 
     // MARK: - WorkspaceTerminationWatcher.Sink

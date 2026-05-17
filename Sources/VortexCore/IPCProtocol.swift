@@ -108,6 +108,15 @@ public struct IPCResponse: Codable, Sendable {
     /// Master switch freeze-логики (ADR 0017). Возвращается в `status`,
     /// принимается в `setFreezingEnabled`.
     public var freezingEnabled: Bool?
+    /// Issue #64: имя текущего lifecycle-состояния VortexCoordinator
+    /// (`idle`/`starting`/`ready`/`degraded`/`recovering`/`stopping`).
+    /// Возвращается в `status`. Optional для backwards-compat — старые
+    /// daemon'ы шлют nil, новые CLI отображают «—».
+    public var coordinatorState: String?
+    /// Issue #64: payload для `coordinatorState == "degraded"` —
+    /// структурная причина (например `mlx_crash_pid=12345_status=139`).
+    /// nil для всех остальных state-ов.
+    public var coordinatorStateReason: String?
     /// См. `IPCWireVersion`. Опциональное; legacy daemon'ы шлют nil.
     public var apiVersion: Int?
 
