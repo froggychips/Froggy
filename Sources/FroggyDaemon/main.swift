@@ -109,6 +109,25 @@ struct FroggyDaemon {
         let workspaceSource: any WorkspaceEventSource = RealWorkspaceEventSource()
         let reactiveFinder = ReactiveProcessFinder(source: workspaceSource)
         await reactiveFinder.start()
+        // Issue #59: vision создаётся ДО coordinator'а, чтобы pacerAdjuster
+        // closure в coordinator init мог захватить ссылку на vision actor.
+        let scorer: any SimilarityScorer = config.contextDedupEnabled
+            ? JaccardSimilarityScorer()
+            : NoopSimilarityScorer()
+        let contextStore = ContextStore(
+            capacity: config.contextWindowSize,
+            scorer: scorer,
+            dedupThreshold: config.contextDedupThreshold
+        )
+        let vision = VisionActor(
+            captureInterval: .seconds(config.captureIntervalSeconds),
+            redactor: Redactor(),
+            contextStore: contextStore,
+            frameSimilarityThreshold: config.frameSimilarityThreshold,
+            warningMultiplier: config.framePacerWarningMultiplier,
+            criticalMultiplier: config.framePacerCriticalMultiplier
+        )
+
         let coordinator = VortexCoordinator(
             mlx: mlx,
             vortex: vortex,
@@ -124,7 +143,19 @@ struct FroggyDaemon {
             echoSuppressionEnabled: config.echoSuppressionEnabled,
             echoSuppressionTailMs: config.echoSuppressionTailMs,
             freezingEnabled: config.freezingEnabled,
-            auditLog: auditLog
+            auditLog: auditLog,
+            // Issue #59: при pressure level change coordinator дёргает
+            // vision.adjustPacerForPressure — OCR замедляется/ускоряется
+            // в соответствии с config.framePacer*Multiplier.
+            pacerAdjuster: { [vision] (levelRaw: String) in
+                let label: VisionActor.PressureLabel
+                switch levelRaw {
+                case "warning": label = .warning
+                case "critical": label = .critical
+                default:        label = .normal
+                }
+                await vision.adjustPacerForPressure(label)
+            }
         )
         await coordinator.startMonitoring()
         // Termination-watcher: чистит FrozenPidsStore при внешнем kill'е.
@@ -134,20 +165,6 @@ struct FroggyDaemon {
             sink: coordinator
         )
         await terminationWatcher.start()
-        let scorer: any SimilarityScorer = config.contextDedupEnabled
-            ? JaccardSimilarityScorer()
-            : NoopSimilarityScorer()
-        let contextStore = ContextStore(
-            capacity: config.contextWindowSize,
-            scorer: scorer,
-            dedupThreshold: config.contextDedupThreshold
-        )
-        let vision = VisionActor(
-            captureInterval: .seconds(config.captureIntervalSeconds),
-            redactor: Redactor(),
-            contextStore: contextStore,
-            frameSimilarityThreshold: config.frameSimilarityThreshold
-        )
 
         // Generic registration: main.swift не знает о конкретных
         // аксессорах, только о регистраторах. Добавление нового модуля

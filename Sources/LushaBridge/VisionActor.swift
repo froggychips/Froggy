@@ -23,14 +23,25 @@ public actor VisionActor {
     private var isCapturing = false
     private var lastDigest: FrameDigest?
     private let stateFilePath: URL
+    /// Base `captureInterval` из конфига. Pacer фактически использует
+    /// `currentInterval`, которое = base × pressure multiplier (issue #59).
     private let captureInterval: Duration
     private let redactor: Redactor
     private let contextStore: ContextStore?
     private let frameSimilarityThreshold: Double
     private let screenStream: ScreenStream
-    /// Внутренний gate: «не запускать OCR чаще, чем раз в `captureInterval`»
-    /// (FCP-1, ADR 0011). Frame, пришедший раньше окна, дропается без
-    /// буферизации. Существует параллельно с polling-sleep'ом ниже —
+    /// Issue #59: множители на base captureInterval для каждого уровня
+    /// memory pressure. На .normal — × 1.0, .warning — × warningMultiplier,
+    /// .critical — × criticalMultiplier. Применяются через
+    /// `adjustPacerForPressure(_:)`.
+    private let warningMultiplier: Double
+    private let criticalMultiplier: Double
+    /// Текущий interval pacer'а после применения pressure multiplier.
+    /// На startup'е = base captureInterval (что эквивалентно .normal).
+    private var currentInterval: Duration
+    /// Внутренний gate: «не запускать OCR чаще, чем раз в `currentInterval`»
+    /// (FCP-1, ADR 0011, issue #59). Frame, пришедший раньше окна, дропается
+    /// без буферизации. Существует параллельно с polling-sleep'ом ниже —
     /// внешний sleep остаётся как cooperative-yield, internal pacer — как
     /// authoritative-gate.
     private var pacer: FramePacer
@@ -40,13 +51,21 @@ public actor VisionActor {
         redactor: Redactor = Redactor(),
         contextStore: ContextStore? = nil,
         frameSimilarityThreshold: Double = 0.98,
-        screenStream: ScreenStream = ScreenStream()
+        screenStream: ScreenStream = ScreenStream(),
+        warningMultiplier: Double = 2.0,
+        criticalMultiplier: Double = 4.0
     ) {
         self.captureInterval = captureInterval
         self.redactor = redactor
         self.contextStore = contextStore
         self.frameSimilarityThreshold = frameSimilarityThreshold
         self.screenStream = screenStream
+        // Multipliers ниже 1.0 не имеют смысла (это бы УСКОРЯЛО OCR на
+        // pressure), clamp'им в [1.0, ∞). Issue #59 acceptance: «никогда
+        // не падает ниже configured min» гарантировано этим clamp'ом.
+        self.warningMultiplier = max(1.0, warningMultiplier)
+        self.criticalMultiplier = max(1.0, criticalMultiplier)
+        self.currentInterval = captureInterval
         self.pacer = FramePacer(interval: captureInterval)
         let supportDir = FileManager.default
             .urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
@@ -72,6 +91,43 @@ public actor VisionActor {
     /// бы pipeline дальше).
     func _admitForTest() -> Bool {
         pacer.shouldAdmit()
+    }
+
+    /// Issue #59: текущий effective interval pacer'а — для тестов и
+    /// observability.
+    public func currentPacerInterval() -> Duration { currentInterval }
+
+    /// Issue #59: адаптирует pacer interval к уровню memory pressure.
+    /// Coordinator вызывает это при каждом pressure level change'е.
+    /// `.normal` → base × 1.0; `.warning` → × warningMultiplier;
+    /// `.critical` → × criticalMultiplier. Pacer пересоздаётся с новым
+    /// interval'ом — lastAdmitted сбрасывается, ближайший кадр становится
+    /// admitted сразу (не накапливаем backlog).
+    public func adjustPacerForPressure(_ level: PressureLabel) {
+        let multiplier: Double
+        switch level {
+        case .normal:   multiplier = 1.0
+        case .warning:  multiplier = warningMultiplier
+        case .critical: multiplier = criticalMultiplier
+        }
+        let baseSec = captureInterval.toSeconds
+        let newSec = baseSec * multiplier
+        let newInterval = Duration.milliseconds(Int(newSec * 1000))
+        guard newInterval != currentInterval else { return }
+        currentInterval = newInterval
+        pacer = FramePacer(interval: newInterval)
+        Self.log.info(
+            "pacer interval adjusted: pressure=\(level.rawValue, privacy: .public) interval_ms=\(Int(newSec * 1000), privacy: .public)"
+        )
+    }
+
+    /// Уровень pressure, понимаемый VisionActor — отвязан от
+    /// `MemoryPressureLevel` из VortexCore, чтобы LushaBridge не зависел
+    /// от VortexCore. Coordinator маппит свой enum в этот при вызове.
+    public enum PressureLabel: String, Sendable {
+        case normal
+        case warning
+        case critical
     }
 
     public func stateFileURL() -> URL { stateFilePath }

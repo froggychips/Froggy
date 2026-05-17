@@ -50,6 +50,15 @@ public actor VortexCoordinator: WorkspaceTerminationWatcher.Sink {
     /// nil — записи не пишутся (используется в юнит-тестах).
     private let auditLog: AuditLog?
 
+    /// Issue #59: adaptive frame pacer hook. Coordinator при каждом
+    /// pressure level change'е дёргает `adjustPacerForPressure`,
+    /// растягивая OCR-interval на .warning/.critical и сжимая обратно
+    /// на .normal. Optional — для тестов / headless-режима без vision.
+    /// Тип `(any Sendable)?` чтобы не таскать `VisionActor` import в
+    /// VortexCore (LushaBridge зависит от VortexCore, не наоборот) —
+    /// coordinator зовёт через closure.
+    private let pacerAdjuster: (@Sendable (String) async -> Void)?
+
     private var tier1Frozen: Set<Int32> = []
     private var tier2Frozen: Set<Int32> = []
     private var listenTask: Task<Void, Never>?
@@ -99,7 +108,8 @@ public actor VortexCoordinator: WorkspaceTerminationWatcher.Sink {
         vadEnabled: Bool = true,
         vadRmsThreshold: Double = 0.008,
         freezingEnabled: Bool = true,
-        auditLog: AuditLog? = nil
+        auditLog: AuditLog? = nil,
+        pacerAdjuster: (@Sendable (String) async -> Void)? = nil
     ) {
         self.mlx = mlx
         self.vortex = vortex
@@ -119,6 +129,7 @@ public actor VortexCoordinator: WorkspaceTerminationWatcher.Sink {
         self.vadRmsThreshold = vadRmsThreshold
         self.freezingEnabled = freezingEnabled
         self.auditLog = auditLog
+        self.pacerAdjuster = pacerAdjuster
     }
 
     // MARK: - Lifecycle
@@ -413,6 +424,13 @@ public actor VortexCoordinator: WorkspaceTerminationWatcher.Sink {
                 "pressure_level=\(level.rawValue) tier1=\(self.tier1Frozen.count) tier2=\(self.tier2Frozen.count)"
             )
         }
+        // Issue #59: vision pacer узнаёт о новом уровне до freeze-логики.
+        // На .warning/.critical OCR растягивается ДО того как мы начнём
+        // SIGSTOP'ить процессы — даёт системе шанс «выдохнуть» раньше.
+        if let pacerAdjuster {
+            await pacerAdjuster(level.rawValue)
+        }
+
         let pressureReason = "pressure_\(level.rawValue)"
         switch level {
         case .warning:

@@ -76,6 +76,16 @@ public struct FroggyConfig: Codable, Sendable, Equatable {
     /// Default true — backwards-compat с существующими config.json.
     public var freezingEnabled: Bool
 
+    /// Issue #59: на `.warning` от MemoryPressureMonitor — растягиваем
+    /// `captureInterval` в N раз. Default 2.0. Никогда не падает ниже
+    /// base interval (multiplier ≥ 1.0 по дизайну).
+    public var framePacerWarningMultiplier: Double
+    /// Issue #59: на `.critical` — растягиваем в N раз. Default 4.0.
+    /// Не отключает OCR полностью (multiplier=∞) — это тратит pressure
+    /// без observability; используйте `.critical` × 4 как «почти пауза»,
+    /// которая всё ещё иногда даёт snapshot.
+    public var framePacerCriticalMultiplier: Double
+
     public var ipcSocketPath: String
     public var frameSimilarityThreshold: Double
     public var contextWindowSize: Int
@@ -113,6 +123,8 @@ public struct FroggyConfig: Codable, Sendable, Equatable {
         freezeRankingEnabled: Bool = true,
         kvCacheBits: Int = 8,
         freezingEnabled: Bool = true,
+        framePacerWarningMultiplier: Double = 2.0,
+        framePacerCriticalMultiplier: Double = 4.0,
         ipcSocketPath: String = FroggyConfig.defaultSocketPath,
         frameSimilarityThreshold: Double = 0.98,
         contextWindowSize: Int = 30,
@@ -142,6 +154,8 @@ public struct FroggyConfig: Codable, Sendable, Equatable {
         self.freezeRankingEnabled = freezeRankingEnabled
         self.kvCacheBits = kvCacheBits
         self.freezingEnabled = freezingEnabled
+        self.framePacerWarningMultiplier = framePacerWarningMultiplier
+        self.framePacerCriticalMultiplier = framePacerCriticalMultiplier
         self.ipcSocketPath = ipcSocketPath
         self.frameSimilarityThreshold = frameSimilarityThreshold
         self.contextWindowSize = contextWindowSize
@@ -212,6 +226,8 @@ public struct FroggyConfig: Codable, Sendable, Equatable {
         self.vadRmsThreshold = try c.decodeIfPresent(Double.self, forKey: .vadRmsThreshold) ?? d.vadRmsThreshold
         self.kvCacheBits = try c.decodeIfPresent(Int.self, forKey: .kvCacheBits) ?? d.kvCacheBits
         self.freezingEnabled = try c.decodeIfPresent(Bool.self, forKey: .freezingEnabled) ?? d.freezingEnabled
+        self.framePacerWarningMultiplier = try c.decodeIfPresent(Double.self, forKey: .framePacerWarningMultiplier) ?? d.framePacerWarningMultiplier
+        self.framePacerCriticalMultiplier = try c.decodeIfPresent(Double.self, forKey: .framePacerCriticalMultiplier) ?? d.framePacerCriticalMultiplier
 
         self.ipcSocketPath = try c.decodeIfPresent(String.self, forKey: .ipcSocketPath) ?? d.ipcSocketPath
         self.frameSimilarityThreshold = try c.decodeIfPresent(Double.self, forKey: .frameSimilarityThreshold) ?? d.frameSimilarityThreshold
