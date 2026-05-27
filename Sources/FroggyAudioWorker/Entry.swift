@@ -180,30 +180,51 @@ final class AudioRuntime: @unchecked Sendable {
             return
         }
 
+        var startedSources: [String] = []
+        var startupErrors: [String] = []
+
         // --- Discord tap ---
         if let pid = discordPid, #available(macOS 14.2, *) {
             do {
                 let (tapAggDeviceID, tapAggTapID) = try createDiscordTap(pid: pid)
                 self.tapID = tapAggTapID
                 self.aggregateDeviceID = tapAggDeviceID
-                startDiscordEngine(aggregateDeviceID: tapAggDeviceID, recognizer: recognizer,
-                                   onDeviceRecognition: onDeviceRecognition)
+                if startDiscordEngine(
+                    aggregateDeviceID: tapAggDeviceID,
+                    recognizer: recognizer,
+                    onDeviceRecognition: onDeviceRecognition
+                ) {
+                    startedSources.append("discord")
+                } else {
+                    startupErrors.append("discord engine start failed")
+                    destroyTapResources()
+                }
             } catch {
                 log.error("discord tap failed: \(error.localizedDescription, privacy: .public)")
-                write(.init(event: AudioWorkerEvent.error, requestId: requestId,
-                            message: "tap failed: \(error.localizedDescription)"))
-                // fallback: только mic
+                startupErrors.append("tap failed: \(error.localizedDescription)")
             }
         } else if discordPid != nil {
-            write(.init(event: AudioWorkerEvent.error, requestId: requestId,
-                        message: "CATapDescription requires macOS 14.2+"))
+            startupErrors.append("CATapDescription requires macOS 14.2+")
         }
 
         // --- Mic ---
-        startMicEngine(recognizer: recognizer, onDeviceRecognition: onDeviceRecognition)
+        if startMicEngine(recognizer: recognizer, onDeviceRecognition: onDeviceRecognition) {
+            startedSources.append("mic")
+        } else {
+            startupErrors.append("mic engine start failed")
+        }
+
+        guard !startedSources.isEmpty else {
+            write(.init(
+                event: AudioWorkerEvent.error,
+                requestId: requestId,
+                message: startupErrors.joined(separator: "; ")
+            ))
+            return
+        }
 
         write(.init(event: AudioWorkerEvent.ready, requestId: requestId))
-        log.notice("capture started discord_pid=\(discordPid.map(String.init) ?? "none")")
+        log.notice("capture started discord_pid=\(discordPid.map(String.init) ?? "none") sources=\(startedSources.joined(separator: ","), privacy: .public)")
     }
 
     private func stopCapture() {
@@ -237,7 +258,11 @@ final class AudioRuntime: @unchecked Sendable {
     // MARK: - Discord tap engine (main thread)
 
     @available(macOS 14.2, *)
-    private func startDiscordEngine(aggregateDeviceID: AudioDeviceID, recognizer: SFSpeechRecognizer, onDeviceRecognition: Bool) {
+    private func startDiscordEngine(
+        aggregateDeviceID: AudioDeviceID,
+        recognizer: SFSpeechRecognizer,
+        onDeviceRecognition: Bool
+    ) -> Bool {
         let discordEngine = AVAudioEngine()
         self.discordEngine = discordEngine
 
@@ -275,7 +300,10 @@ final class AudioRuntime: @unchecked Sendable {
             try discordEngine.start()
         } catch {
             log.error("discord engine start failed: \(error.localizedDescription, privacy: .public)")
-            return
+            inputNode.removeTap(onBus: 0)
+            self.discordEngine = nil
+            self.discordRequest = nil
+            return false
         }
 
         self.discordTask = recognizer.recognitionTask(with: req) { [weak self] result, error in
@@ -296,6 +324,7 @@ final class AudioRuntime: @unchecked Sendable {
                 }
             }
         }
+        return true
     }
 
     private func restartDiscordTask(recognizer: SFSpeechRecognizer) {
@@ -325,7 +354,7 @@ final class AudioRuntime: @unchecked Sendable {
 
     // MARK: - Mic engine (main thread)
 
-    private func startMicEngine(recognizer: SFSpeechRecognizer, onDeviceRecognition: Bool) {
+    private func startMicEngine(recognizer: SFSpeechRecognizer, onDeviceRecognition: Bool) -> Bool {
         let micEngine = AVAudioEngine()
         let inputNode = micEngine.inputNode
         let format = inputNode.outputFormat(forBus: 0)
@@ -353,7 +382,9 @@ final class AudioRuntime: @unchecked Sendable {
             try micEngine.start()
         } catch {
             log.error("mic engine start failed: \(error.localizedDescription, privacy: .public)")
-            return
+            inputNode.removeTap(onBus: 0)
+            self.micRequest = nil
+            return false
         }
 
         self.micTask = recognizer.recognitionTask(with: req) { [weak self] result, error in
@@ -372,6 +403,7 @@ final class AudioRuntime: @unchecked Sendable {
         }
 
         self.micEngine = micEngine
+        return true
     }
 
     // MARK: - Echo suppression helpers

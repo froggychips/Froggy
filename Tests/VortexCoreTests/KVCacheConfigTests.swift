@@ -34,4 +34,10 @@ final class KVCacheConfigTests: XCTestCase {
         let actual = await supervisor.currentKVCacheBits()
         XCTAssertEqual(actual, 4)
     }
+
+    func testSupervisorReadsConfiguredMemoryLimit() async {
+        let supervisor = MLXSupervisor(memoryLimitBytes: 1_234_567_890)
+        let actual = await supervisor.currentMemoryLimitBytes()
+        XCTAssertEqual(actual, 1_234_567_890)
+    }
 }

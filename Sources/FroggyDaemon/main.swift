@@ -541,8 +541,7 @@ struct DaemonIPCHandler: IPCRequestHandler, Sendable {
             }
 
         case "thawAll":
-            await vortex.thawAll()
-            await auditLog?.record(op: "thawAll", reason: "manual_ipc", outcome: "ok")
+            await coordinator.thawAll(reason: "manual_ipc")
             return .success()
 
         case "listen":

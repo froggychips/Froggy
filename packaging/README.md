@@ -9,12 +9,14 @@ require Apple Developer ID secrets that don't belong in the repo.
 ```sh
 swift build -c release --product FroggyDaemon
 swift build -c release --product FroggyMLXWorker
+swift build -c release --product FroggyAudioWorker
 swift build -c release --product FroggyMenuBar
 swift build -c release --product froggy
 ```
 
-С Mem-3 у нас **два** обязательных бинаря для работы LLM: `FroggyDaemon`
-и `FroggyMLXWorker`. Worker должен лежать рядом с демоном (`<exec_dir>/FroggyMLXWorker`)
+С Mem-3 у нас обязательные worker-бинари рядом с daemon-ом:
+`FroggyMLXWorker` для LLM и `FroggyAudioWorker` для meeting capture.
+Worker должен лежать рядом с демоном (`<exec_dir>/FroggyMLXWorker`)
 или путь к нему указан в `config.json` (`mlxWorkerPath`). См. ADR 0008.
 
 ## 2. Codesign with hardened runtime + entitlements
@@ -85,6 +87,12 @@ xcrun stapler staple .build/arm64-apple-macosx/release/FroggyDaemon
 sudo install -m 0755 \
     .build/arm64-apple-macosx/release/FroggyDaemon \
     /usr/local/libexec/FroggyDaemon
+sudo install -m 0755 \
+    .build/arm64-apple-macosx/release/FroggyMLXWorker \
+    /usr/local/libexec/FroggyMLXWorker
+sudo install -m 0755 \
+    .build/arm64-apple-macosx/release/FroggyAudioWorker \
+    /usr/local/libexec/FroggyAudioWorker
 sudo install -m 0755 \
     .build/arm64-apple-macosx/release/FroggyMenuBar \
     /usr/local/libexec/FroggyMenuBar

@@ -33,17 +33,18 @@ DIST=$(ls "$TMPDIR")
 BASE="$TMPDIR/$DIST"
 
 # --- бинари ---
-echo "Устанавливаю бинари в $INSTALL_BIN..."
-for bin in FroggyDaemon froggy; do
-    [[ -f "$BASE/$bin" ]] && sudo install -m 755 "$BASE/$bin" "$INSTALL_BIN/$bin"
-done
+echo "Устанавливаю CLI в $INSTALL_BIN..."
+[[ -f "$BASE/froggy" ]] && sudo install -m 755 "$BASE/froggy" "$INSTALL_BIN/froggy"
 
-echo "Устанавливаю FroggyMLXWorker в $INSTALL_LIBEXEC..."
+echo "Устанавливаю daemon и worker'ы в $INSTALL_LIBEXEC..."
 sudo mkdir -p "$INSTALL_LIBEXEC"
+[[ -f "$BASE/FroggyDaemon" ]] && sudo install -m 755 "$BASE/FroggyDaemon" "$INSTALL_LIBEXEC/FroggyDaemon"
 [[ -f "$BASE/FroggyMLXWorker" ]] && sudo install -m 755 "$BASE/FroggyMLXWorker" "$INSTALL_LIBEXEC/FroggyMLXWorker"
+[[ -f "$BASE/FroggyAudioWorker" ]] && sudo install -m 755 "$BASE/FroggyAudioWorker" "$INSTALL_LIBEXEC/FroggyAudioWorker"
+[[ -f "$BASE/FroggyMenuBar" ]] && sudo install -m 755 "$BASE/FroggyMenuBar" "$INSTALL_LIBEXEC/FroggyMenuBar"
 
 # --- metallib ---
-RESOURCES_DST="/usr/local/libexec/FroggyResources"
+RESOURCES_DST="$INSTALL_LIBEXEC/Resources"
 sudo mkdir -p "$RESOURCES_DST"
 [[ -f "$BASE/Resources/default.metallib" ]] && \
     sudo cp "$BASE/Resources/default.metallib" "$RESOURCES_DST/default.metallib"
@@ -54,7 +55,7 @@ PLIST_SRC="$BASE/LaunchAgent/$PLIST"
 if [[ -f "$PLIST_SRC" ]]; then
     cp "$PLIST_SRC" "$LAUNCHAGENT_DIR/$PLIST"
     # Подставляем реальный путь к бинарю
-    sed -i '' "s|/usr/local/bin/FroggyDaemon|$INSTALL_BIN/FroggyDaemon|g" \
+    sed -i '' "s|/usr/local/libexec/FroggyDaemon|$INSTALL_LIBEXEC/FroggyDaemon|g" \
         "$LAUNCHAGENT_DIR/$PLIST"
     launchctl bootout "gui/$(id -u)/$PLIST" 2>/dev/null || true
     launchctl bootstrap "gui/$(id -u)" "$LAUNCHAGENT_DIR/$PLIST"

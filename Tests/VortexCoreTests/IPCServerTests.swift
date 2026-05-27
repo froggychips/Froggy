@@ -33,9 +33,36 @@ final class IPCServerTests: XCTestCase {
         await server.stop()
     }
 
+    func testOversizedLineIsRejected() async throws {
+        let path = FileManager.default.temporaryDirectory
+            .appendingPathComponent("froggy-ipc-\(UUID()).sock").path
+        let server = IPCServer(socketPath: path, handler: EchoHandler())
+        try await server.start()
+        defer { Task { await server.stop() } }
+
+        try await Task.sleep(for: .milliseconds(50))
+
+        let response = try await Self.sendRaw(
+            socketPath: path,
+            payload: Data(repeating: 0x61, count: (1 << 20) + 1)
+        )
+        XCTAssertEqual(response.ok, false)
+        XCTAssertEqual(response.error, "request too large")
+
+        await server.stop()
+    }
+
     /// Подключается к unix-socket, отправляет одну строку JSON, читает одну строку JSON.
     private static func sendRequest(
         socketPath: String, request: IPCRequest
+    ) async throws -> IPCResponse {
+        var data = try JSONEncoder().encode(request)
+        data.append(0x0A)
+        return try await sendRaw(socketPath: socketPath, payload: data)
+    }
+
+    private static func sendRaw(
+        socketPath: String, payload: Data
     ) async throws -> IPCResponse {
         try await withCheckedThrowingContinuation { (cont: CheckedContinuation<IPCResponse, Error>) in
             DispatchQueue.global().async {
@@ -45,6 +72,8 @@ final class IPCServerTests: XCTestCase {
                     return
                 }
                 defer { close(fd) }
+                var one: Int32 = 1
+                setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &one, socklen_t(MemoryLayout<Int32>.size))
 
                 var addr = sockaddr_un()
                 addr.sun_family = sa_family_t(AF_UNIX)
@@ -70,11 +99,15 @@ final class IPCServerTests: XCTestCase {
                     return
                 }
                 do {
-                    var data = try JSONEncoder().encode(request)
-                    data.append(0x0A)
-                    _ = data.withUnsafeBytes { ptr -> Int in
+                    _ = payload.withUnsafeBytes { ptr -> Int in
                         guard let base = ptr.baseAddress else { return 0 }
-                        return write(fd, base, ptr.count)
+                        var total = 0
+                        while total < ptr.count {
+                            let n = write(fd, base.advanced(by: total), ptr.count - total)
+                            if n <= 0 { return total }
+                            total += n
+                        }
+                        return total
                     }
                     var buf = [UInt8](repeating: 0, count: 4096)
                     var collected = Data()

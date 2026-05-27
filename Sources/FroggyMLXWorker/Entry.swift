@@ -19,13 +19,18 @@ struct FroggyMLXWorker {
         log.notice("worker started pid=\(getpid()) wireVersion=\(MLXWireVersion.current)")
 
         let cli = CLIFlags.parse(CommandLine.arguments)
-        let runtime = WorkerRuntime(log: log, defaultKVBits: cli.kvBits)
+        let runtime = WorkerRuntime(
+            log: log,
+            defaultKVBits: cli.kvBits,
+            memoryLimitBytes: cli.memoryLimitBytes
+        )
         await runtime.run()
     }
 }
 
 struct CLIFlags {
     var kvBits: Int? = nil
+    var memoryLimitBytes: Int? = nil
 
     static func parse(_ argv: [String]) -> CLIFlags {
         var out = CLIFlags()
@@ -36,6 +41,11 @@ struct CLIFlags {
             case "--kv-bits":
                 if i + 1 < argv.count, let v = Int(argv[i + 1]) {
                     out.kvBits = (v == 16) ? nil : v // 16 → без квантизации
+                }
+                i += 2
+            case "--memory-limit-bytes":
+                if i + 1 < argv.count, let v = Int(argv[i + 1]), v > 0 {
+                    out.memoryLimitBytes = v
                 }
                 i += 2
             default:
@@ -49,13 +59,15 @@ struct CLIFlags {
 actor WorkerRuntime {
     private let log: Logger
     private let defaultKVBits: Int?
+    private let configuredMemoryLimitBytes: Int?
     private var container: ModelContainer?
     private var loadedPath: String?
     private var memoryLimitApplied = false
 
-    init(log: Logger, defaultKVBits: Int? = nil) {
+    init(log: Logger, defaultKVBits: Int? = nil, memoryLimitBytes: Int? = nil) {
         self.log = log
         self.defaultKVBits = defaultKVBits
+        self.configuredMemoryLimitBytes = memoryLimitBytes
     }
 
     func run() async {
@@ -120,7 +132,8 @@ actor WorkerRuntime {
 
         if !memoryLimitApplied {
             let physical = Int(ProcessInfo.processInfo.physicalMemory)
-            MLX.Memory.memoryLimit = max(2 << 30, physical * 6 / 10)
+            MLX.Memory.memoryLimit = configuredMemoryLimitBytes
+                ?? max(2 << 30, physical * 6 / 10)
             // Cache limit: how aggressively MLX returns freed buffers to the system.
             // 75% of Metal recommended working set prevents the cache from crowding
             // out Vortex pressure management. signerlabs/Klee LLMService.swift

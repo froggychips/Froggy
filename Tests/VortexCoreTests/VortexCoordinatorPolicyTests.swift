@@ -145,4 +145,29 @@ final class VortexCoordinatorPolicyTests: XCTestCase {
         XCTAssertEqual(final.tier2Frozen.count, 1)
         await coord.stopMonitoring()
     }
+
+    func testManualThawAllClearsCoordinatorTierState() async throws {
+        let (coord, src, stub) = makeCoordinator(cooldown: 0.5)
+        await coord.startMonitoring()
+        try await Task.sleep(for: .milliseconds(50))
+
+        src.emit(.warning)
+        try await Task.sleep(for: .milliseconds(200))
+        let beforeThaw = await coord.pressureSnapshot()
+        XCTAssertEqual(Set(beforeThaw.tier1Frozen), [1001, 1002])
+
+        await coord.thawAll(reason: "test")
+        let afterThaw = await coord.pressureSnapshot()
+        XCTAssertTrue(afterThaw.tier1Frozen.isEmpty)
+        XCTAssertTrue(afterThaw.tier2Frozen.isEmpty)
+        let frozenAfterThaw = await stub.currentlyFrozen()
+        XCTAssertTrue(frozenAfterThaw.isEmpty)
+
+        src.emit(.critical)
+        try await Task.sleep(for: .milliseconds(200))
+        let afterRefreeze = await coord.pressureSnapshot()
+        XCTAssertEqual(Set(afterRefreeze.tier1Frozen), [1001, 1002])
+        XCTAssertEqual(Set(afterRefreeze.tier2Frozen), [2001])
+        await coord.stopMonitoring()
+    }
 }

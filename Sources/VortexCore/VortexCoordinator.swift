@@ -259,12 +259,18 @@ public actor VortexCoordinator: WorkspaceTerminationWatcher.Sink {
 
     /// Жёсткая моментальная оттепель — для SIGINT/SIGTERM-обработчика.
     public func emergencyThaw() async {
+        await thawAll(reason: "emergency")
+    }
+
+    /// Полная оттепель через coordinator, чтобы in-memory tier-set'ы,
+    /// VortexActor и audit trail оставались синхронными.
+    public func thawAll(reason: String = "manual") async {
         thawTask?.cancel()
         thawTask = nil
-        await thawTier(.tier2, reason: "emergency")
-        await thawTier(.tier1, reason: "emergency")
+        await thawTier(.tier2, reason: reason)
+        await thawTier(.tier1, reason: reason)
         await vortex.thawAll()
-        await auditLog?.record(op: "thawAll", reason: "emergency")
+        await auditLog?.record(op: "thawAll", reason: reason)
     }
 
     public func generate(prompt: String, maxTokens: Int = 200) async throws -> String {

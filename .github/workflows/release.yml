@@ -42,7 +42,7 @@ jobs:
 
       - name: Ad-hoc codesign
         run: |
-          for bin in FroggyDaemon FroggyMenuBar FroggyMLXWorker froggy; do
+          for bin in FroggyDaemon FroggyMenuBar FroggyMLXWorker FroggyAudioWorker froggy; do
             path=".build/release/$bin"
             if [ -f "$path" ]; then
               codesign --force --sign - "$path"
@@ -56,7 +56,7 @@ jobs:
           DIST="froggy-${VERSION}-arm64"
           mkdir -p "$DIST/Resources" "$DIST/LaunchAgent" "$DIST/playbooks"
 
-          for bin in FroggyDaemon FroggyMenuBar FroggyMLXWorker froggy; do
+          for bin in FroggyDaemon FroggyMenuBar FroggyMLXWorker FroggyAudioWorker froggy; do
             path=".build/release/$bin"
             [ -f "$path" ] && cp "$path" "$DIST/"
           done

@@ -29,6 +29,7 @@ public actor IPCServer {
     /// POI-канал — Instruments автоматически рендерит это в Points of
     /// Interest track'е. Используется для IPC roundtrip overlay'я.
     private static let poi = OSSignposter(subsystem: "com.froggychips.froggy", category: "PointsOfInterest")
+    private static let maxLineBytes = 1 << 20
 
     private let socketPath: String
     private let handler: any IPCRequestHandler
@@ -238,6 +239,10 @@ public actor IPCServer {
                 // startIndex, который у Data после mutations может быть
                 // не нулевым. Считаем смещение через distance().
                 let endOffset = buffer.distance(from: buffer.startIndex, to: nl)
+                guard endOffset <= maxLineBytes else {
+                    writeJSONLine(.failure("request too large"), to: fd)
+                    return
+                }
                 let line = Data(buffer.prefix(endOffset))
                 buffer.removeSubrange(buffer.startIndex...nl)
                 await processLine(
@@ -247,6 +252,10 @@ public actor IPCServer {
                     firstCommandLogged: &firstCommandLogged,
                     handler: handler
                 )
+            }
+            guard buffer.count <= maxLineBytes else {
+                writeJSONLine(.failure("request too large"), to: fd)
+                return
             }
         }
     }

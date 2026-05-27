@@ -64,7 +64,10 @@ public actor MLXSupervisor {
     /// init уже завершён и self полностью валиден.
     private lazy var host: WorkerProcessHost = WorkerProcessHost(
         workerURL: workerURL,
-        args: ["--kv-bits", String(kvCacheBits)] + extraArgs,
+        args: [
+            "--kv-bits", String(kvCacheBits),
+            "--memory-limit-bytes", String(memoryLimitBytes),
+        ] + extraArgs,
         log: Self.log,
         pidStore: pidStore,
         onLine: { [weak self] line in
@@ -110,6 +113,7 @@ public actor MLXSupervisor {
     }
 
     public func currentKVCacheBits() -> Int { kvCacheBits }
+    public func currentMemoryLimitBytes() -> Int { memoryLimitBytes }
 
     /// Ищем worker рядом с FroggyDaemon: `<exec_dir>/FroggyMLXWorker`.
     /// Если файла нет — ошибка будет на `loadModel`, а не на init.
