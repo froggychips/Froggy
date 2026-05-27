@@ -20,7 +20,21 @@
 *   **MLX Swift Reference:** Главный источник по работе с тензорами.
 *   **ADR (Architecture Decision Records):** Все ключевые решения (например, выбор Actor вместо Lock) должны фиксироваться в `/docs/adr/`.
 
-## 4. Навыки
+## 4. Проверка
+
+Используйте уровни Makefile по радиусу изменений:
+
+*   `make smoke` — быстрые pure unit-тесты для pre-commit feedback.
+*   `make test` — полный Swift test suite с подготовленным `default.metallib`.
+*   `make ecosystem-smoke` — локальная сквозная проверка Froggy daemon,
+    FroggyKit, `froggy-mcp` и `froggy-sre`.
+
+`make ecosystem-smoke` ожидает живой socket демона по пути
+`~/Library/Application Support/Froggy/froggy.sock` и соседние репозитории в
+`~/FroggyKit`, `~/froggy-mcp` и `~/froggy-sre`. Пути можно переопределить через
+`FROGGY_IPC_SOCKET`, `FROGGYKIT_REPO`, `FROGGY_MCP_REPO` и `FROGGY_SRE_REPO`.
+
+## 5. Навыки
 *   **Swift Concurrency Debugging:** Глубокое понимание `Task` и `Actor`.
 *   **Metal Performance Shaders (MPS):** Оптимизация инференса под кэш GPU M-чипов.
 *   **ARM64 Assembly:** Базовое понимание Memory Access для оптимизации MLX-слоев.

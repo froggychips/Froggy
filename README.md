@@ -38,7 +38,7 @@ For the longer-form *"is this for me?"* answer, read [POSITIONING.md](docs/POSIT
 
 | Companion | What it adds |
 |---|---|
-| [froggy-mcp](https://github.com/froggychips/froggy-mcp) | MCP server — gives Claude Code four tools to query Froggy directly over its Unix socket (screen context, local LLM, meeting transcripts, daemon status). No copy-paste. |
+| [froggy-mcp](https://github.com/froggychips/froggy-mcp) | MCP server — gives Claude Code tools to query Froggy directly over its Unix socket (screen context, local LLM, meeting transcripts, daemon status, memory controls). No copy-paste. |
 | [froggy-sre](https://github.com/froggychips/froggy-sre) | SRE incident response agent — feeds Kubernetes alerts through a 5-stage pipeline (analyze → hypothesize → critique → fix → risk). Routes LLM calls to Froggy first, falls back to Anthropic API. |
 
 ```
@@ -53,6 +53,9 @@ or *"summarise the last call"* — and Froggy answers from its local context wit
 anything. Heavy reasoning stays in the cloud; screen and transcript content travels to the cloud
 model on each tool call, with credentials stripped by `Redactor` beforehand. See
 [ADR-0016](docs/adr/0016-froggy-mcp-cloud-routing-privacy.md) for the exact data-flow audit.
+
+For a local end-to-end compatibility check across Froggy, FroggyKit, `froggy-mcp`,
+and `froggy-sre`, run `make ecosystem-smoke`.
 
 ## Features
 

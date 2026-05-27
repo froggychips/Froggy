@@ -17,6 +17,33 @@
 
 ---
 
+## Ecosystem Smoke Test
+
+Запускайте локальный контрактный тест после изменений в IPC, FroggyKit,
+MCP-инструментах, SRE-роутинге, release layout или запуске демона:
+
+```sh
+make ecosystem-smoke
+```
+
+Тест проверяет, что:
+
+* socket демона принимает raw JSON-line запрос `status`;
+* временный SwiftPM-клиент импортирует локальный FroggyKit и вызывает демон;
+* `froggy-mcp` стартует через stdio JSON-RPC, отдаёт ожидаемые tools и вызывает
+  `froggy_status`;
+* `froggy-sre` стартует через stdio JSON-RPC, отдаёт ожидаемые tools и выполняет
+  dry-run `sre_analyze` с историей инцидентов во временной директории;
+* версии участвующих репозиториев выводятся как compatibility summary.
+
+По умолчанию соседние репозитории ожидаются в `~/FroggyKit`, `~/froggy-mcp` и
+`~/froggy-sre`, а socket демона — в
+`~/Library/Application Support/Froggy/froggy.sock`. Пути можно переопределить
+через `FROGGYKIT_REPO`, `FROGGY_MCP_REPO`, `FROGGY_SRE_REPO`,
+`FROGGY_IPC_SOCKET`, `FROGGY_MCP_BIN` или `FROGGY_SRE_BIN`.
+
+---
+
 ## Полная карта экосистемы
 
 ```

@@ -22,11 +22,14 @@ IPC, через который можно дёргать его из любог�
 
 | Компаньон | Что добавляет |
 |---|---|
-| [froggy-mcp](https://github.com/froggychips/froggy-mcp) | MCP-сервер — даёт Claude Code четыре инструмента для обращения к Froggy через Unix-сокет (контекст экрана, локальный LLM, транскрипты созвонов, статус daemon). Без copy-paste. |
+| [froggy-mcp](https://github.com/froggychips/froggy-mcp) | MCP-сервер — даёт Claude Code инструменты для обращения к Froggy через Unix-сокет (контекст экрана, локальный LLM, транскрипты созвонов, статус daemon, управление памятью). Без copy-paste. |
+| [froggy-sre](https://github.com/froggychips/froggy-sre) | SRE-агент — прогоняет Kubernetes-инциденты через пайплайн analyze → hypothesize → critique → fix → risk. Сначала маршрутизирует LLM-вызовы в Froggy, затем fallback в Anthropic API. |
 
 ```
 Claude Code  ←— stdio / MCP (JSON-RPC) —→  froggy-mcp  ←— Unix socket / JSON-line —→  Froggy daemon
               (облако, мощный reasoning)                    (локально, приватно, видит экран)
+
+Claude Code  ←— stdio / MCP (JSON-RPC) —→  froggy-sre  ←— socket (primary) / HTTPS (fallback) —→  Froggy / Anthropic
 ```
 
 После регистрации `froggy-mcp` облачная модель может спросить *«что сейчас открыто на экране?»*
@@ -34,6 +37,9 @@ Claude Code  ←— stdio / MCP (JSON-RPC) —→  froggy-mcp  ←— Unix socke
 Тяжёлый reasoning идёт в облако; контент экрана и транскриптов уходит в облачную модель при
 каждом вызове инструмента, с предварительным вырезанием credentials через `Redactor`. Подробный
 аудит потоков данных — [ADR-0016](docs/adr/0016-froggy-mcp-cloud-routing-privacy.md).
+
+Для локальной сквозной проверки совместимости Froggy, FroggyKit, `froggy-mcp` и
+`froggy-sre` используйте `make ecosystem-smoke`.
 
 ## Возможности
 

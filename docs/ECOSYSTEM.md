@@ -17,6 +17,33 @@ Visual overview of all repositories, processes, IPC channels, and data flows in 
 
 ---
 
+## Ecosystem Smoke Test
+
+Run the local contract test after changing IPC, FroggyKit, MCP tools, SRE routing,
+release layout, or daemon startup behavior:
+
+```sh
+make ecosystem-smoke
+```
+
+The test checks that:
+
+* the Froggy daemon socket accepts a raw JSON-line `status` request;
+* a temporary SwiftPM client can import local FroggyKit and call the daemon;
+* `froggy-mcp` starts over stdio JSON-RPC, exposes expected tools, and can call
+  `froggy_status`;
+* `froggy-sre` starts over stdio JSON-RPC, exposes expected tools, and can run a
+  dry-run `sre_analyze` with incident history isolated in a temp directory;
+* the participating repo revisions are printed as a compatibility summary.
+
+Defaults assume the sibling repos live at `~/FroggyKit`, `~/froggy-mcp`, and
+`~/froggy-sre`, with the daemon socket at
+`~/Library/Application Support/Froggy/froggy.sock`. Override with
+`FROGGYKIT_REPO`, `FROGGY_MCP_REPO`, `FROGGY_SRE_REPO`, `FROGGY_IPC_SOCKET`,
+`FROGGY_MCP_BIN`, or `FROGGY_SRE_BIN`.
+
+---
+
 ## Full Ecosystem Map
 
 ```

@@ -27,7 +27,22 @@ Development uses a suite of MCP servers:
 * **ADR (Architecture Decision Records):** All key decisions (for example,
   choosing an Actor over a Lock) must be recorded in `/docs/adr/`.
 
-## 4. Skills
+## 4. Verification
+
+Use the Makefile tiers according to blast radius:
+
+* `make smoke` — fast pure unit tests for pre-commit feedback.
+* `make test` — full Swift test suite with `default.metallib` prepared.
+* `make ecosystem-smoke` — local end-to-end check across Froggy daemon,
+  FroggyKit, `froggy-mcp`, and `froggy-sre`.
+
+`make ecosystem-smoke` expects the daemon socket to be live at
+`~/Library/Application Support/Froggy/froggy.sock` and companion repos at
+`~/FroggyKit`, `~/froggy-mcp`, and `~/froggy-sre`. Override paths with
+`FROGGY_IPC_SOCKET`, `FROGGYKIT_REPO`, `FROGGY_MCP_REPO`, and
+`FROGGY_SRE_REPO`.
+
+## 5. Skills
 
 * **Swift Concurrency Debugging:** Deep understanding of `Task` and `Actor`.
 * **Metal Performance Shaders (MPS):** Inference optimization for the GPU
