@@ -3,7 +3,7 @@
 # Без этого pre-build шага FroggyMLXWorker не может загрузить
 # ни одной MLX-модели в release-сборке через SwiftPM.
 
-.PHONY: build build-debug release smoke test full resolve metallib logbundle session-summary release-tag clean help
+.PHONY: build build-debug release smoke test full resolve metallib ecosystem-smoke logbundle session-summary release-tag clean help
 
 # Default target: release build.
 build: release
@@ -43,6 +43,11 @@ test: resolve metallib
 full: test
 	cd bench && ./run.sh
 
+# Проверяет весь локальный Froggy ecosystem:
+# daemon socket, FroggyKit, froggy-mcp и froggy-sre dry-run.
+ecosystem-smoke:
+	scripts/ecosystem-smoke.sh
+
 # Только metallib. Idempotent, безопасно повторно.
 metallib: resolve
 	scripts/compile-metallib.sh
@@ -80,6 +85,7 @@ help:
 	@echo "make smoke         — быстрые unit'ы (~секунды), без metallib/integration"
 	@echo "make test          — swift test (нужен metallib для MLX-смок-тестов)"
 	@echo "make full          — test + bench/run.sh"
+	@echo "make ecosystem-smoke — проверить Froggy+FroggyKit+MCP+SRE локально"
 	@echo "make metallib      — только пересобрать default.metallib"
 	@echo "make logbundle     — собрать froggy.logarchive для bug-report'а"
 	@echo "make session-summary — собрать session-bundle (log+SQLite+state+IPC+notes)"
