@@ -57,11 +57,10 @@ public actor MLXSupervisor {
     /// `crash-on-generate`.
     private let extraArgs: [String]
 
-    /// Pipe-lifecycle (issue #58). Lazy чтобы захватить `self` в callback'ах —
-    /// `[weak self]` capture в actor init напрямую запрещён Swift 6
-    /// (cannot access stored property here in nonisolated initializer).
-    /// Lazy откладывает создание до первого доступа, к моменту которого
-    /// init уже завершён и self полностью валиден.
+    /// Pipe-lifecycle (issue #58). Lazy: `host` ссылается на stored
+    /// properties, а в actor init их трогать из closure нельзя (Swift 6).
+    /// Callback'и host'а только кладут события в `pipeContinuation` —
+    /// в actor они попадают через один последовательный `pipePump`.
     private lazy var host: WorkerProcessHost = WorkerProcessHost(
         workerURL: workerURL,
         args: [
@@ -70,15 +69,23 @@ public actor MLXSupervisor {
         ] + extraArgs,
         log: Self.log,
         pidStore: pidStore,
-        onLine: { [weak self] line in
-            guard let self else { return }
-            Task { await self.handleLine(line) }
+        onLine: { [pipeContinuation] line, gen in
+            pipeContinuation.yield(.line(line, generation: gen))
         },
-        onExit: { [weak self] pid, status in
-            guard let self else { return }
-            Task { await self.handleWorkerExit(pid: pid, status: status) }
+        onExit: { [pipeContinuation] pid, status, gen in
+            pipeContinuation.yield(.exit(pid: pid, status: status, generation: gen))
         }
     )
+    /// Последовательная доставка событий pipe'а (см. `WorkerPipeEvent`).
+    /// Раньше на каждую строку создавался независимый `Task`, и порядок
+    /// `chunk, chunk, done` не гарантировался — `done` мог обогнать хвост
+    /// токенов и закрыть continuation раньше времени. Один потребитель
+    /// `for await` восстанавливает порядок pipe'а. События с чужим
+    /// `generation` (строка старого процесса, уже лежавшая в очереди на
+    /// момент respawn'а) отбрасываются.
+    private let pipeEvents: AsyncStream<WorkerPipeEvent>
+    private let pipeContinuation: AsyncStream<WorkerPipeEvent>.Continuation
+    private var pipePump: Task<Void, Never>?
     private var loadedPath: String?
     private var pendingRequests: [String: AsyncThrowingStream<MLXWorkerEvent, any Error>.Continuation] = [:]
     /// Issue #57: warning о версии wire-протокола логируется один раз на
@@ -110,6 +117,16 @@ public actor MLXSupervisor {
         self.pidStore = pidStore
         self.kvCacheBits = kvCacheBits
         self.extraArgs = extraArgs
+        let (events, continuation) = AsyncStream<WorkerPipeEvent>.makeStream(
+            bufferingPolicy: .unbounded
+        )
+        self.pipeEvents = events
+        self.pipeContinuation = continuation
+    }
+
+    deinit {
+        pipePump?.cancel()
+        pipeContinuation.finish()
     }
 
     public func currentKVCacheBits() -> Int { kvCacheBits }
@@ -183,7 +200,17 @@ public actor MLXSupervisor {
         // чтобы handleWorkerExit не сдёрнул crash observer'ов на
         // нормальный unload-сценарий.
         expectedExit = true
-        try? sendCommand(.init(cmd: MLXWorkerCommand.shutdown, requestId: UUID().uuidString))
+        // Запись в pipe синхронная: зависший worker, не читающий stdin,
+        // заполнил бы pipe и запись встала бы навсегда — до SIGKILL-fallback'а
+        // мы бы не дошли. `writeWithTimeout` ждёт не дольше секунды.
+        if let data = try? JSONEncoder().encode(
+            MLXWorkerCommand(cmd: MLXWorkerCommand.shutdown, requestId: UUID().uuidString)
+        ) {
+            let sent = await host.writeWithTimeout(data, timeout: .seconds(1))
+            if !sent {
+                Self.log.warning("shutdown command write stalled for pid=\(workerPid, privacy: .public) — falling back to exit wait + SIGKILL")
+            }
+        }
 
         let exited = await host.waitForExit(timeout: .seconds(3))
         if !exited {
@@ -309,6 +336,7 @@ public actor MLXSupervisor {
     }
 
     private func ensureWorkerSpawned() throws {
+        ensurePipePump()
         do {
             try host.ensureSpawned()
         } catch WorkerProcessHost.WorkerProcessError.workerNotFound(let p) {
@@ -318,6 +346,33 @@ public actor MLXSupervisor {
         } catch {
             throw MLXSupervisorError.workerSpawnFailed(error.localizedDescription)
         }
+    }
+
+    /// Стартует единственный потребитель `pipeEvents`. Живёт всю жизнь
+    /// supervisor'а (переживает load/unload-циклы), отменяется в deinit.
+    private func ensurePipePump() {
+        guard pipePump == nil else { return }
+        let events = pipeEvents
+        pipePump = Task { [weak self] in
+            for await event in events {
+                guard let self else { return }
+                switch event {
+                case .line(let line, let gen):
+                    guard await self.isCurrentGeneration(gen) else { continue }
+                    await self.handleLine(line)
+                case .exit(let pid, let status, let gen):
+                    guard await self.isCurrentGeneration(gen) else {
+                        Self.log.notice("dropping exit of stale worker gen=\(gen) pid=\(pid)")
+                        continue
+                    }
+                    await self.handleWorkerExit(pid: pid, status: status)
+                }
+            }
+        }
+    }
+
+    private func isCurrentGeneration(_ gen: UInt64) -> Bool {
+        host.currentGeneration() == gen
     }
 
     private func sendCommand(_ cmd: MLXWorkerCommand) throws {
@@ -335,7 +390,8 @@ public actor MLXSupervisor {
         }
     }
 
-    /// Вызывается из `WorkerProcessHost.onLine` для каждой полной строки stdout'а.
+    /// Вызывается из `pipePump` для каждой полной строки stdout'а — строго
+    /// в порядке pipe'а.
     private func handleLine(_ line: Data) {
         guard let event = try? JSONDecoder().decode(MLXWorkerEvent.self, from: line) else { return }
         deliverEvent(event)
@@ -367,7 +423,7 @@ public actor MLXSupervisor {
     }
 
     /// Host фильтрует terminationHandler-arrival через generation-counter,
-    /// но это не покрывает второй race: onExit→Task ждёт в actor queue,
+    /// но это не покрывает второй race: `.exit` ждёт своей очереди в pipePump,
     /// и за это время может выполниться следующий `loadModel` который
     /// уже spawn'нул новый worker. К моменту handleWorkerExit состояние
     /// supervisor'а уже принадлежит новому процессу — cleanup убил бы

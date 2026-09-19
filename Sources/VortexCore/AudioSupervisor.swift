@@ -9,6 +9,9 @@ public enum AudioSupervisorError: Error, Sendable, CustomStringConvertible {
     case workerSpawnFailed(String)
     case workerCrashed
     case captureFailed(String)
+    /// Второй `startCapture`, пока первый ждёт `ready`. Два pending старта
+    /// делили бы одни флаги отмены — отказываем сразу, без второго ожидания.
+    case startInProgress
 
     public var description: String {
         switch self {
@@ -16,6 +19,7 @@ public enum AudioSupervisorError: Error, Sendable, CustomStringConvertible {
         case .workerSpawnFailed(let r): return "Не удалось spawn-нуть audio worker: \(r)"
         case .workerCrashed:           return "Audio worker упал во время захвата"
         case .captureFailed(let r):    return "Capture failed: \(r)"
+        case .startInProgress:         return "startCapture уже выполняется"
         }
     }
 }
@@ -37,25 +41,36 @@ public actor AudioSupervisor {
 
     private let workerURL: URL
     private let pidStore: FrozenPidsStore?
+    /// Каталог markdown-сессий. Дефолт — `~/Documents/Froggy/Meetings`;
+    /// тесты передают временный каталог, чтобы не писать в реальные документы.
+    private let sessionDirectory: URL
     /// Pipe-lifecycle (issue #58). Lazy по той же причине что и в MLXSupervisor —
-    /// Swift 6 запрещает `[weak self]` capture в actor init.
+    /// stored properties из closure в actor init недоступны. Callback'и host'а
+    /// только кладут события в `pipeContinuation`; в actor они попадают через
+    /// один последовательный `pipePump` (см. `WorkerPipeEvent`).
     private lazy var host: WorkerProcessHost = WorkerProcessHost(
         workerURL: workerURL,
         args: [],
         log: Self.log,
         pidStore: pidStore,
-        onLine: { [weak self] line in
-            guard let self else { return }
-            Task { await self.handleLine(line) }
+        onLine: { [pipeContinuation] line, gen in
+            pipeContinuation.yield(.line(line, generation: gen))
         },
-        onExit: { [weak self] pid, status in
-            guard let self else { return }
-            Task { await self.handleWorkerExit(pid: pid, status: status) }
+        onExit: { [pipeContinuation] pid, status, gen in
+            pipeContinuation.yield(.exit(pid: pid, status: status, generation: gen))
         }
     )
+    private let pipeEvents: AsyncStream<WorkerPipeEvent>
+    private let pipeContinuation: AsyncStream<WorkerPipeEvent>.Continuation
+    private var pipePump: Task<Void, Never>?
     private var pendingRequests: [String: CheckedContinuation<Void, any Error>] = [:]
     private var subscribers: [UUID: AsyncStream<TranscriptEvent>.Continuation] = [:]
     private var capturing = false
+    /// `startCapture` ждёт `ready` от worker'а через continuation; в это окно
+    /// `capturing == false`, и `stopCapture` раньше был no-op — микрофон
+    /// оставался включённым вопреки явной остановке. Флаги закрывают окно.
+    private var startInFlight = false
+    private var stopRequestedDuringStart = false
     private var sessionStore: SessionStore?
     private var lastSessionURL: URL?
     /// Issue #57: once-per-spawn wire-version warning (см. MLXSupervisor).
@@ -66,10 +81,22 @@ public actor AudioSupervisor {
     /// наравне с MLX worker'ом.
     public init(
         workerExecutableURL: URL? = nil,
-        pidStore: FrozenPidsStore? = nil
+        pidStore: FrozenPidsStore? = nil,
+        sessionDirectory: URL = SessionStore.defaultDirectory
     ) {
         self.workerURL = workerExecutableURL ?? Self.defaultWorkerURL()
         self.pidStore = pidStore
+        self.sessionDirectory = sessionDirectory
+        let (events, continuation) = AsyncStream<WorkerPipeEvent>.makeStream(
+            bufferingPolicy: .unbounded
+        )
+        self.pipeEvents = events
+        self.pipeContinuation = continuation
+    }
+
+    deinit {
+        pipePump?.cancel()
+        pipeContinuation.finish()
     }
 
     public static func defaultWorkerURL() -> URL {
@@ -120,41 +147,70 @@ public actor AudioSupervisor {
         vadEnabled: Bool = true,
         vadRmsThreshold: Double = 0.008
     ) async throws {
+        guard !startInFlight else { throw AudioSupervisorError.startInProgress }
         try ensureWorkerSpawned()
 
+        startInFlight = true
+        stopRequestedDuringStart = false
+        defer { startInFlight = false }
+
         let id = UUID().uuidString
-        try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Void, any Error>) in
-            self.pendingRequests[id] = cont
-            do {
-                try self.sendCommand(.init(
-                    cmd: AudioWorkerCommand.startCapture,
-                    discordPid: discordPid,
-                    requestId: id,
-                    locale: locale,
-                    onDeviceRecognition: onDeviceRecognition,
-                    echoSuppression: echoSuppression,
-                    echoSuppressionTailMs: echoSuppressionTailMs,
-                    vadEnabled: vadEnabled,
-                    vadRmsThreshold: vadRmsThreshold
-                ))
-            } catch {
-                self.pendingRequests.removeValue(forKey: id)
-                cont.resume(throwing: error)
+        do {
+            try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Void, any Error>) in
+                self.pendingRequests[id] = cont
+                do {
+                    try self.sendCommand(.init(
+                        cmd: AudioWorkerCommand.startCapture,
+                        discordPid: discordPid,
+                        requestId: id,
+                        locale: locale,
+                        onDeviceRecognition: onDeviceRecognition,
+                        echoSuppression: echoSuppression,
+                        echoSuppressionTailMs: echoSuppressionTailMs,
+                        vadEnabled: vadEnabled,
+                        vadRmsThreshold: vadRmsThreshold
+                    ))
+                } catch {
+                    self.pendingRequests.removeValue(forKey: id)
+                    cont.resume(throwing: error)
+                }
             }
+        } catch {
+            stopRequestedDuringStart = false
+            throw error
         }
+
+        if stopRequestedDuringStart {
+            // `stopCapture` пришёл, пока ждали `ready`: worker уже пишет —
+            // гасим его сразу, сессию не открываем, `capturing` не выставляем.
+            stopRequestedDuringStart = false
+            try? sendCommand(.init(cmd: AudioWorkerCommand.stopCapture, requestId: UUID().uuidString))
+            Self.log.notice("audio capture cancelled: stop requested during start")
+            return
+        }
+
         capturing = true
-        let sessionURL = SessionStore.makeURL()
-        if let store = try? SessionStore(at: sessionURL) {
+        let requestedURL = SessionStore.makeURL(in: sessionDirectory)
+        do {
+            let store = try SessionStore(at: requestedURL)
             sessionStore = store
-            lastSessionURL = sessionURL
-        } else {
-            Self.log.error("session store creation failed: \(sessionURL.path, privacy: .public)")
+            // `store.url` может отличаться суффиксом `-N`, если имя было занято.
+            lastSessionURL = store.url
+        } catch {
+            Self.log.error("session store creation failed: \(requestedURL.path, privacy: .public): \(String(describing: error), privacy: .public)")
         }
         Self.log.notice("audio capture started discord_pid=\(discordPid.map(String.init) ?? "none") locale=\(locale) onDevice=\(onDeviceRecognition) echo=\(echoSuppression)")
     }
 
     /// Останавливает запись. Worker остаётся жить (готов к следующей сессии).
+    /// Если `startCapture` ещё ждёт `ready` — остановка откладывается до его
+    /// возвращения и выполняется там (см. `stopRequestedDuringStart`).
     public func stopCapture() async {
+        if startInFlight {
+            stopRequestedDuringStart = true
+            Self.log.notice("audio stop requested during start — deferred")
+            return
+        }
         guard capturing else { return }
         try? sendCommand(.init(cmd: AudioWorkerCommand.stopCapture, requestId: UUID().uuidString))
         capturing = false
@@ -162,10 +218,18 @@ public actor AudioSupervisor {
     }
 
     /// Полное завершение: shutdown worker'а + ожидание exit'а + SIGKILL fallback.
-    /// Симметрично `MLXSupervisor.unloadModel`.
+    /// Симметрично `MLXSupervisor.unloadModel`: shutdown-команда пишется с
+    /// таймаутом, чтобы зависший worker (полный pipe) не блокировал SIGKILL.
     public func shutdown() async {
-        guard host.currentPid() != nil else { return }
-        try? sendCommand(.init(cmd: AudioWorkerCommand.shutdown, requestId: UUID().uuidString))
+        guard let workerPid = host.currentPid() else { return }
+        if let data = try? JSONEncoder().encode(
+            AudioWorkerCommand(cmd: AudioWorkerCommand.shutdown, requestId: UUID().uuidString)
+        ) {
+            let sent = await host.writeWithTimeout(data, timeout: .seconds(1))
+            if !sent {
+                Self.log.warning("shutdown command write stalled for pid=\(workerPid, privacy: .public) — falling back to exit wait + SIGKILL")
+            }
+        }
         let exited = await host.waitForExit(timeout: .seconds(3))
         if !exited {
             await host.sigkill()
@@ -176,6 +240,7 @@ public actor AudioSupervisor {
     // MARK: - Worker spawn
 
     private func ensureWorkerSpawned() throws {
+        ensurePipePump()
         do {
             try host.ensureSpawned()
         } catch WorkerProcessHost.WorkerProcessError.workerNotFound(let p) {
@@ -188,6 +253,33 @@ public actor AudioSupervisor {
     }
 
     // MARK: - stdin/stdout
+
+    /// Единственный потребитель `pipeEvents` — строки и exit доставляются в
+    /// actor в порядке pipe'а. Живёт всю жизнь supervisor'а, отменяется в deinit.
+    private func ensurePipePump() {
+        guard pipePump == nil else { return }
+        let events = pipeEvents
+        pipePump = Task { [weak self] in
+            for await event in events {
+                guard let self else { return }
+                switch event {
+                case .line(let line, let gen):
+                    guard await self.isCurrentGeneration(gen) else { continue }
+                    await self.handleLine(line)
+                case .exit(let pid, let status, let gen):
+                    guard await self.isCurrentGeneration(gen) else {
+                        Self.log.notice("dropping exit of stale audio worker gen=\(gen) pid=\(pid)")
+                        continue
+                    }
+                    await self.handleWorkerExit(pid: pid, status: status)
+                }
+            }
+        }
+    }
+
+    private func isCurrentGeneration(_ gen: UInt64) -> Bool {
+        host.currentGeneration() == gen
+    }
 
     private func sendCommand(_ cmd: AudioWorkerCommand) throws {
         let data = try JSONEncoder().encode(cmd)
@@ -269,6 +361,7 @@ public actor AudioSupervisor {
         for cont in subscribers.values { cont.finish() }
         subscribers.removeAll()
         capturing = false
+        stopRequestedDuringStart = false
         // Issue #57: следующий spawn — другой бинарь, мог отстать.
         wireVersionMismatchLogged = false
         host.cleanup()

@@ -11,6 +11,13 @@ final class WorkerProcessHostTests: XCTestCase {
 
     private let log = Logger(subsystem: "com.froggychips.froggy.test", category: "host-test")
 
+    override func setUp() {
+        super.setUp()
+        // Демон делает то же самое в main.swift: запись в pipe мёртвого
+        // worker'а должна давать EPIPE → Swift-ошибку, а не убивать процесс.
+        signal(SIGPIPE, SIG_IGN)
+    }
+
     /// `/usr/bin/true` exit'ится мгновенно с status=0. waitForExit должен
     /// вернуть true в пределах short timeout'а.
     func testWaitForExitOnAlreadyExitedProcess() async throws {
@@ -19,8 +26,8 @@ final class WorkerProcessHostTests: XCTestCase {
             workerURL: URL(fileURLWithPath: "/usr/bin/true"),
             args: [],
             log: log,
-            onLine: { _ in },
-            onExit: { _, status in
+            onLine: { _, _ in },
+            onExit: { _, status, _ in
                 XCTAssertEqual(status, 0)
                 exitReceived.fulfill()
             }
@@ -44,8 +51,8 @@ final class WorkerProcessHostTests: XCTestCase {
             workerURL: URL(fileURLWithPath: "/bin/cat"),
             args: [],
             log: log,
-            onLine: { _ in },
-            onExit: { _, _ in }
+            onLine: { _, _ in },
+            onExit: { _, _, _ in }
         )
         try host.ensureSpawned()
         XCTAssertTrue(host.isRunning())
@@ -61,8 +68,8 @@ final class WorkerProcessHostTests: XCTestCase {
             workerURL: URL(fileURLWithPath: "/bin/cat"),
             args: [],
             log: log,
-            onLine: { _ in },
-            onExit: { _, _ in }
+            onLine: { _, _ in },
+            onExit: { _, _, _ in }
         )
         try host.ensureSpawned()
         let firstPid = host.currentPid()
@@ -79,8 +86,8 @@ final class WorkerProcessHostTests: XCTestCase {
             workerURL: URL(fileURLWithPath: "/nonexistent/path/froggy-worker-fake"),
             args: [],
             log: log,
-            onLine: { _ in },
-            onExit: { _, _ in }
+            onLine: { _, _ in },
+            onExit: { _, _, _ in }
         )
         XCTAssertThrowsError(try host.ensureSpawned()) { error in
             guard case WorkerProcessHost.WorkerProcessError.workerNotFound = error else {
@@ -100,10 +107,10 @@ final class WorkerProcessHostTests: XCTestCase {
             workerURL: URL(fileURLWithPath: "/bin/cat"),
             args: [],
             log: log,
-            onLine: { data in
+            onLine: { data, _ in
                 received.append(data)
             },
-            onExit: { _, _ in }
+            onExit: { _, _, _ in }
         )
         try host.ensureSpawned()
         try host.write(Data("hello\n".utf8))
@@ -118,6 +125,78 @@ final class WorkerProcessHostTests: XCTestCase {
         XCTAssertEqual(lines[safe: 1], Data("world".utf8))
         XCTAssertEqual(lines[safe: 2], Data("partial".utf8))
         await host.sigkill()
+        host.cleanup()
+    }
+
+    /// EOF без завершающего `\n`: остаток буфера должен прийти как последняя
+    /// строка. Раньше EOF игнорировался — хвост терялся, а readabilityHandler
+    /// крутился с пустыми данными до cleanup'а.
+    func testStdoutTailWithoutNewlineDeliveredOnEOF() async throws {
+        let received = LineCollector()
+        // Handshake: `onExit` host эмитит только после EOF на stdout, а
+        // хвост доставляется до отметки EOF — к моменту onExit все строки
+        // уже в коллекторе. Никаких sleep'ов.
+        let exitReceived = expectation(description: "onExit after EOF")
+        let host = WorkerProcessHost(
+            workerURL: URL(fileURLWithPath: "/bin/sh"),
+            args: ["-c", "printf 'first\\nsecond'"],
+            log: log,
+            onLine: { data, _ in received.append(data) },
+            onExit: { _, _, _ in exitReceived.fulfill() }
+        )
+        try host.ensureSpawned()
+        await fulfillment(of: [exitReceived], timeout: 3)
+        let lines = received.snapshot()
+        XCTAssertEqual(lines.count, 2, "хвост без \\n должен быть доставлен как строка")
+        XCTAssertEqual(lines[safe: 0], Data("first".utf8))
+        XCTAssertEqual(lines[safe: 1], Data("second".utf8))
+        host.cleanup()
+    }
+
+    /// Порядок строк на выходе host'а совпадает с порядком в pipe'е —
+    /// на этом стоит последовательный pump в supervisor'ах.
+    func testStdoutLinesPreserveOrder() async throws {
+        let received = LineCollector()
+        let exitReceived = expectation(description: "onExit after EOF")
+        let host = WorkerProcessHost(
+            workerURL: URL(fileURLWithPath: "/bin/sh"),
+            args: ["-c", "i=1; while [ $i -le 200 ]; do echo $i; i=$((i+1)); done"],
+            log: log,
+            onLine: { data, _ in received.append(data) },
+            onExit: { _, _, _ in exitReceived.fulfill() }
+        )
+        try host.ensureSpawned()
+        await fulfillment(of: [exitReceived], timeout: 5)
+        let lines = received.snapshot().map { String(decoding: $0, as: UTF8.self) }
+        XCTAssertEqual(lines, (1...200).map(String.init))
+        host.cleanup()
+    }
+
+    /// Запись в stdin exit'нувшегося worker'а — ошибка, а не падение процесса.
+    /// Legacy `FileHandle.write(_:)` здесь поднимал ObjC-exception.
+    func testWriteToExitedWorkerThrows() async throws {
+        let host = WorkerProcessHost(
+            workerURL: URL(fileURLWithPath: "/usr/bin/true"),
+            args: [],
+            log: log,
+            onLine: { _, _ in },
+            onExit: { _, _, _ in }
+        )
+        try host.ensureSpawned()
+        let exited = await host.waitForExit(timeout: .seconds(2))
+        XCTAssertTrue(exited)
+        // Первая запись может успеть в буфер pipe'а до того, как ядро заметит
+        // отсутствие читателя; вторая — точно EPIPE. Проверяем, что ни одна
+        // не убивает процесс, и хотя бы одна из них бросает.
+        var threw = false
+        for _ in 0..<2 {
+            do {
+                try host.write(Data("{\"cmd\":\"ping\"}".utf8))
+            } catch {
+                threw = true
+            }
+        }
+        XCTAssertTrue(threw, "запись в pipe без читателя должна бросать writeFailed/notRunning")
         host.cleanup()
     }
 }

@@ -41,7 +41,11 @@ final class MLXSupervisorIntegrationTests: XCTestCase {
         XCTAssertNil(pidAfter)
     }
 
-    /// generate стримит несколько chunk'ов. fake worker эмитит «tok0…tok4 » + done.
+    /// generate стримит несколько chunk'ов. fake worker эмитит «tok0…tok4 » + done
+    /// строго по порядку — supervisor обязан отдать их в том же порядке и
+    /// не потерять хвост. Раньше `done` мог обогнать последние токены:
+    /// на каждую строку создавался независимый `Task`, и порядок входа в
+    /// actor не гарантировался.
     func testGenerateStreamsChunks() async throws {
         let supervisor = MLXSupervisor(workerExecutableURL: fakeWorkerURL)
         try await supervisor.loadModel(modelPath: "/tmp/fake-model")
@@ -51,8 +55,8 @@ final class MLXSupervisorIntegrationTests: XCTestCase {
         for try await chunk in supervisor.generateStream(prompt: "hi", maxTokens: 5) {
             collected.append(chunk)
         }
-        XCTAssertGreaterThanOrEqual(collected.count, 1, "ожидали хотя бы 1 chunk")
-        XCTAssertTrue(collected.joined().contains("tok"), "ожидали fake-токены, получили: \(collected)")
+        XCTAssertEqual(collected, ["tok0 ", "tok1 ", "tok2 ", "tok3 ", "tok4 "],
+                       "fake-токены должны прийти все и по порядку, получили: \(collected)")
     }
 
     /// fake worker в режиме `ignore-shutdown` не отвечает на `shutdown`.

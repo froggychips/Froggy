@@ -62,6 +62,15 @@ final class AudioRuntime: @unchecked Sendable {
 
     // Speech recognition
     private var recognizer: SFSpeechRecognizer?
+    /// Оба request'а читает audio render thread (tap → `append`), а main
+    /// подменяет/обнуляет их при restart/stop. Несинхронизированный доступ
+    /// к ARC-ссылке с двух потоков — гонка вплоть до падения, поэтому
+    /// доступ ТОЛЬКО через `requestLock`: tap берёт снимок под lock и
+    /// делает `append` вне lock; main подменяет под lock и `endAudio()`
+    /// старому вызывает уже после подмены. `append` в старый request по
+    /// уже взятому снимку безвреден — SFSpeech игнорирует буферы после
+    /// `endAudio()`.
+    private let requestLock = NSLock()
     private var discordRequest: SFSpeechAudioBufferRecognitionRequest?
     private var discordTask: SFSpeechRecognitionTask?
     private var micRequest: SFSpeechAudioBufferRecognitionRequest?
@@ -78,6 +87,9 @@ final class AudioRuntime: @unchecked Sendable {
     private let echoRmsThreshold: Float = 0.005
     private var vadEnabled = true
     private var vadThreshold: Float = 0.008
+    /// Настройка on-device распознавания текущей сессии — нужна при
+    /// перезапуске speech-задач, чтобы новый request не ушёл в облако.
+    private var onDeviceRecognition = true
 
     init(log: Logger, defaultDiscordPid: Int32?) {
         self.log = log
@@ -170,6 +182,7 @@ final class AudioRuntime: @unchecked Sendable {
         lastDiscordAudioTime = -.infinity
         self.vadEnabled = vadEnabled
         self.vadThreshold = vadRmsThreshold
+        self.onDeviceRecognition = onDeviceRecognition
 
         recognizer = SFSpeechRecognizer(locale: Locale(identifier: locale))
         recognizer?.defaultTaskHint = .dictation
@@ -230,13 +243,11 @@ final class AudioRuntime: @unchecked Sendable {
     private func stopCapture() {
         discordTask?.cancel()
         discordTask = nil
-        discordRequest?.endAudio()
-        discordRequest = nil
+        swapDiscordRequest(nil)?.endAudio()
 
         micTask?.cancel()
         micTask = nil
-        micRequest?.endAudio()
-        micRequest = nil
+        swapMicRequest(nil)?.endAudio()
 
         discordEngine?.stop()
         discordEngine?.inputNode.removeTap(onBus: 0)
@@ -282,18 +293,24 @@ final class AudioRuntime: @unchecked Sendable {
         let req = SFSpeechAudioBufferRecognitionRequest()
         req.shouldReportPartialResults = true
         req.requiresOnDeviceRecognition = onDeviceRecognition
-        self.discordRequest = req
+        swapDiscordRequest(req)?.endAudio()
 
         let format = inputNode.outputFormat(forBus: 0)
-        inputNode.installTap(onBus: 0, bufferSize: 4096, format: format) { [weak self, weak req] buffer, _ in
+        // Tap читает АКТУАЛЬНЫЙ `discordRequest` (снимок под lock), а не
+        // захваченный `req`: после `restartDiscordTask` (лимит ~60 с у
+        // SFSpeechRecognizer) старый request уже `endAudio()`, и захваченная
+        // ссылка тихо теряла всё аудио — транскрипция Discord умирала после
+        // первой ошибки.
+        inputNode.installTap(onBus: 0, bufferSize: 4096, format: format) { [weak self] buffer, _ in
+            guard let self else { return }
             // Отмечаем время последнего активного Discord-аудио для echo suppression.
-            if self?.echoSuppressionEnabled == true {
+            if self.echoSuppressionEnabled {
                 let rms = Self.bufferRMS(buffer)
-                if rms > self?.echoRmsThreshold ?? 0.005 {
-                    self?.lastDiscordAudioTime = ProcessInfo.processInfo.systemUptime
+                if rms > self.echoRmsThreshold {
+                    self.lastDiscordAudioTime = ProcessInfo.processInfo.systemUptime
                 }
             }
-            req?.append(buffer)
+            self.currentDiscordRequest()?.append(buffer)
         }
 
         do {
@@ -302,7 +319,7 @@ final class AudioRuntime: @unchecked Sendable {
             log.error("discord engine start failed: \(error.localizedDescription, privacy: .public)")
             inputNode.removeTap(onBus: 0)
             self.discordEngine = nil
-            self.discordRequest = nil
+            swapDiscordRequest(nil)?.endAudio()
             return false
         }
 
@@ -329,11 +346,15 @@ final class AudioRuntime: @unchecked Sendable {
 
     private func restartDiscordTask(recognizer: SFSpeechRecognizer) {
         discordTask?.cancel()
-        discordRequest?.endAudio()
 
         let req = SFSpeechAudioBufferRecognitionRequest()
         req.shouldReportPartialResults = true
-        self.discordRequest = req
+        // Без этого новый request получал дефолт `false` — аудио могло уйти
+        // в облако вопреки настройке сессии.
+        req.requiresOnDeviceRecognition = onDeviceRecognition
+        // Сначала подмена под lock, потом endAudio старому: tap с этого
+        // момента видит только новый request.
+        swapDiscordRequest(req)?.endAudio()
 
         self.discordTask = recognizer.recognitionTask(with: req) { [weak self] result, error in
             if let result {
@@ -362,20 +383,23 @@ final class AudioRuntime: @unchecked Sendable {
         let req = SFSpeechAudioBufferRecognitionRequest()
         req.shouldReportPartialResults = true
         req.requiresOnDeviceRecognition = onDeviceRecognition
-        self.micRequest = req
+        swapMicRequest(req)?.endAudio()
 
-        inputNode.installTap(onBus: 0, bufferSize: 4096, format: format) { [weak self, weak req] buffer, _ in
+        // Как и у Discord-tap'а: читаем актуальный `micRequest` (снимок под
+        // lock), чтобы перезапуск задачи не оставил tap с мёртвым request'ом.
+        inputNode.installTap(onBus: 0, bufferSize: 4096, format: format) { [weak self] buffer, _ in
+            guard let s = self else { return }
             // Echo suppression gate: пропускаем буфер только если Discord
             // молчал дольше echoTailSeconds.
-            if let s = self, s.echoSuppressionEnabled {
+            if s.echoSuppressionEnabled {
                 let sinceDiscord = ProcessInfo.processInfo.systemUptime - s.lastDiscordAudioTime
                 if sinceDiscord < s.echoTailSeconds { return }
             }
             // VAD gate: пропускаем только если RMS выше порога тишины.
-            if let s = self, s.vadEnabled {
+            if s.vadEnabled {
                 if Self.bufferRMS(buffer) < s.vadThreshold { return }
             }
-            req?.append(buffer)
+            s.currentMicRequest()?.append(buffer)
         }
 
         do {
@@ -383,7 +407,7 @@ final class AudioRuntime: @unchecked Sendable {
         } catch {
             log.error("mic engine start failed: \(error.localizedDescription, privacy: .public)")
             inputNode.removeTap(onBus: 0)
-            self.micRequest = nil
+            swapMicRequest(nil)?.endAudio()
             return false
         }
 
@@ -398,12 +422,71 @@ final class AudioRuntime: @unchecked Sendable {
                 ))
             }
             if let error, let eng = self?.micEngine, eng.isRunning {
-                self?.log.warning("mic task error: \(error.localizedDescription, privacy: .public)")
+                // Симметрично Discord: тот же лимит ~60 с — раньше здесь был
+                // только warning, и микрофонная транскрипция молча замирала.
+                self?.log.warning("mic task error: \(error.localizedDescription, privacy: .public) — restarting")
+                self?.restartMicTask(recognizer: recognizer)
             }
         }
 
         self.micEngine = micEngine
         return true
+    }
+
+    private func restartMicTask(recognizer: SFSpeechRecognizer) {
+        micTask?.cancel()
+
+        let req = SFSpeechAudioBufferRecognitionRequest()
+        req.shouldReportPartialResults = true
+        req.requiresOnDeviceRecognition = onDeviceRecognition
+        swapMicRequest(req)?.endAudio()
+
+        self.micTask = recognizer.recognitionTask(with: req) { [weak self] result, error in
+            if let result {
+                let text = result.bestTranscription.formattedString
+                self?.write(.init(
+                    event: AudioWorkerEvent.transcript,
+                    text: text,
+                    isFinal: result.isFinal,
+                    speaker: "mic"
+                ))
+            }
+            if let error, let eng = self?.micEngine, eng.isRunning {
+                self?.log.warning("mic task restart error: \(error.localizedDescription, privacy: .public)")
+                self?.restartMicTask(recognizer: recognizer)
+            }
+        }
+    }
+
+    // MARK: - Request access (requestLock)
+
+    /// Подменяет request под lock, возвращает предыдущий — вызывающий
+    /// делает ему `endAudio()` уже вне lock.
+    @discardableResult
+    private func swapDiscordRequest(_ new: SFSpeechAudioBufferRecognitionRequest?) -> SFSpeechAudioBufferRecognitionRequest? {
+        requestLock.lock(); defer { requestLock.unlock() }
+        let old = discordRequest
+        discordRequest = new
+        return old
+    }
+
+    @discardableResult
+    private func swapMicRequest(_ new: SFSpeechAudioBufferRecognitionRequest?) -> SFSpeechAudioBufferRecognitionRequest? {
+        requestLock.lock(); defer { requestLock.unlock() }
+        let old = micRequest
+        micRequest = new
+        return old
+    }
+
+    /// Снимок для tap'а (audio render thread). `append` — вне lock.
+    private func currentDiscordRequest() -> SFSpeechAudioBufferRecognitionRequest? {
+        requestLock.lock(); defer { requestLock.unlock() }
+        return discordRequest
+    }
+
+    private func currentMicRequest() -> SFSpeechAudioBufferRecognitionRequest? {
+        requestLock.lock(); defer { requestLock.unlock() }
+        return micRequest
     }
 
     // MARK: - Echo suppression helpers
@@ -521,7 +604,13 @@ final class AudioRuntime: @unchecked Sendable {
     private func write(_ event: AudioWorkerEvent) {
         guard var data = try? JSONEncoder().encode(event) else { return }
         data.append(0x0A)
-        stdout.write(data)
+        // `write(contentsOf:)` вместо legacy `write(_:)`: закрытый демоном pipe
+        // даёт Swift-ошибку, а не ObjC-exception, роняющее worker без лога.
+        do {
+            try stdout.write(contentsOf: data)
+        } catch {
+            log.error("stdout write failed: \(error.localizedDescription, privacy: .public)")
+        }
     }
 }
 
