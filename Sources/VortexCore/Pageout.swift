@@ -5,19 +5,28 @@ import os
 /// Стратегия принудительного pageout: после `SIGSTOP` страницы dirty всё ещё
 /// резидентны, и SIGSTOP сам по себе RAM не возвращает. Заставляем компрессор
 /// вытеснить процесс одним из трёх путей.
+///
+/// Честно (ADR 0018): для непривилегированного LaunchAgent реально работает
+/// только `scratch`. `machVM` и `jetsam` оставлены как opt-in для окружений
+/// с правами (root / отключённый SIP / development-ядро) — см. описания ниже.
 public enum PageoutStrategy: String, Sendable, Codable, CaseIterable {
     /// `task_for_pid` + `mach_vm_behavior_set(VM_BEHAVIOR_PAGEOUT)` для каждого
-    /// region'а. Самый прямой путь — но требует `task_for_pid-allow`-entitlement
-    /// и Developer ID-подписи.
+    /// writable-region'а. Требует `task_for_pid` на чужой процесс (SIP off или
+    /// entitlement), а сам `VM_BEHAVIOR_PAGEOUT` в SDK помечен «development
+    /// only»: release-ядро отвечает `KERN_INVALID_ARGUMENT` на каждый region,
+    /// и стратегия честно возвращает `.failed`. До ревью 2026-09-19 здесь стояла
+    /// константа 6 = `VM_BEHAVIOR_FREE` («освободить без write-back»), то есть
+    /// уничтожение содержимого страниц чужого процесса.
     case machVM
     /// `memorystatus_control(MEMORYSTATUS_CMD_SET_PRIORITY_PROPERTIES, idle, …)` —
-    /// двигает процесс в jetsam idle-band, и компрессор ставит его первым в
-    /// очередь на pageout под реальным давлением. Без entitlements, но без
-    /// гарантии немедленного pageout.
+    /// двигает процесс в jetsam idle-band. XNU (`bsd/kern/kern_memorystatus.c`)
+    /// пускает к этой команде только root или процесс с entitlement
+    /// `com.apple.private.memorystatus`; всем остальным — `EPERM`. Для обычного
+    /// LaunchAgent стратегия недостижима.
     case jetsam
     /// Аллоцируем `scratchMB` буфер, заполняем его, освобождаем — провоцируем
-    /// компрессор сделать его работу прямо сейчас. Грязный fallback, но
-    /// работает всегда без специальных прав.
+    /// компрессор сделать его работу прямо сейчас. Грязно, но это единственный
+    /// путь без привилегий; дефолт с ADR 0018.
     case scratch
 }
 
@@ -36,6 +45,9 @@ public protocol PageoutImpl: Sendable {
 /// Композит: пробует preferredStrategy, при KERN_FAILURE/EPERM откатывается
 /// по цепочке machVM → jetsam → scratch. Лог-варн один раз за сессию для
 /// каждого «сорванного» уровня.
+///
+/// Дефолт `preferred` — `.scratch` (ADR 0018): machVM/jetsam без привилегий
+/// гарантированно падают, и их попытка лишь портит счётчики в IPC `pressure`.
 public actor PageoutChain {
     private static let log = Logger(subsystem: "com.froggychips.froggy", category: "pageout")
 
@@ -48,7 +60,7 @@ public actor PageoutChain {
     private var counters: PageoutCounters = .init()
 
     public init(
-        preferred: PageoutStrategy = .jetsam,
+        preferred: PageoutStrategy = .scratch,
         machVM: any PageoutImpl = MachVMPageoutImpl(),
         jetsam: any PageoutImpl = JetsamPageoutImpl(),
         scratch: any PageoutImpl = ScratchPageoutImpl(scratchMB: 256)
@@ -131,6 +143,7 @@ public struct PageoutCounters: Sendable, Codable, Equatable {
 /// На обычной dev-подписи `task_for_pid` возвращает `KERN_FAILURE` — это сигнал
 /// для `PageoutChain` упасть к jetsam.
 public struct MachVMPageoutImpl: PageoutImpl {
+    private static let log = Logger(subsystem: "com.froggychips.froggy", category: "pageout")
     public init() {}
 
     public func pageout(pid: Int32) async -> PageoutOutcome {
@@ -143,6 +156,9 @@ public struct MachVMPageoutImpl: PageoutImpl {
 
         var address: mach_vm_address_t = 0
         var hinted: UInt64 = 0
+        var candidateRegions = 0
+        var acceptedRegions = 0
+        var lastBehaviorKR: kern_return_t = KERN_SUCCESS
         let infoCount0 = mach_msg_type_number_t(
             MemoryLayout<vm_region_basic_info_data_64_t>.size / MemoryLayout<integer_t>.size
         )
@@ -176,15 +192,30 @@ public struct MachVMPageoutImpl: PageoutImpl {
             let isExec = (prot & VM_PROT_EXECUTE) != 0
             let isWritable = (prot & VM_PROT_WRITE) != 0
             if !isExec && isWritable {
+                candidateRegions += 1
                 let behaviorKR = mach_vm_behavior_set(task, address, size, kVMBehaviorPageout)
                 if behaviorKR == KERN_SUCCESS {
+                    acceptedRegions += 1
                     hinted &+= UInt64(size)
+                } else {
+                    // KERN_INVALID_ARGUMENT — либо shared-memory-регион, либо
+                    // (на release-ядре) сам VM_BEHAVIOR_PAGEOUT не поддержан.
+                    // Один регион не фатален; фатально — когда не принят ни один.
+                    lastBehaviorKR = behaviorKR
                 }
-                // KERN_INVALID_ARGUMENT часто бывает на shared-memory-региях,
-                // не считаем фатальным — просто пропускаем.
             }
             address &+= mach_vm_address_t(size)
         }
+        // Ноль принятых регионов — это не «успех без страниц», а отказ ядра:
+        // VM_BEHAVIOR_PAGEOUT существует только в development-сборках XNU.
+        // Возвращаем .failed, чтобы PageoutChain откатился дальше.
+        guard acceptedRegions > 0 else {
+            return .failed(
+                reason: "mach_vm_behavior_set(VM_BEHAVIOR_PAGEOUT) принят 0 из \(candidateRegions) регионов "
+                    + "(последний kr=\(lastBehaviorKR)) — release-ядро не поддерживает PAGEOUT"
+            )
+        }
+        Self.log.debug("machVM pageout pid=\(pid) hinted \(hinted) bytes in \(acceptedRegions) regions")
         return .success(strategyUsed: .machVM)
     }
 }
@@ -209,7 +240,15 @@ public struct JetsamPageoutImpl: PageoutImpl {
             )
         }
         if rc != 0 {
-            return .failed(reason: "memorystatus_control rc=\(rc) errno=\(errno)")
+            let err = errno
+            if err == EPERM {
+                return .failed(
+                    reason: "memorystatus_control EPERM — SET_PRIORITY_PROPERTIES требует root или "
+                        + "entitlement com.apple.private.memorystatus (XNU kern_memorystatus.c); "
+                        + "для LaunchAgent стратегия jetsam недостижима, см. ADR 0018"
+                )
+            }
+            return .failed(reason: "memorystatus_control rc=\(rc) errno=\(err)")
         }
         return .success(strategyUsed: .jetsam)
     }
@@ -268,14 +307,20 @@ private func memorystatus_control_swift(
     _ buffersize: Int
 ) -> Int32
 
-/// `MEMORYSTATUS_CMD_SET_PRIORITY_PROPERTIES` (xnu).
-private let kMemorystatusCmdSetPriorityProperties: UInt32 = 1
+/// `MEMORYSTATUS_CMD_SET_PRIORITY_PROPERTIES` (xnu bsd/sys/kern_memorystatus.h).
+/// Заголовок приватный, в SDK его нет — значение переписано с исходника XNU:
+/// `1` = GET_PRIORITY_LIST, `2` = SET_PRIORITY_PROPERTIES. До ревью 2026-09-19
+/// здесь стояла `1`, то есть в ядро уходила команда чтения списка.
+private let kMemorystatusCmdSetPriorityProperties: UInt32 = 2
 /// `JETSAM_PRIORITY_IDLE` (xnu).
 private let kJetsamPriorityIdle: Int32 = 0
-/// `VM_REGION_BASIC_INFO_64` (mach/vm_region.h).
-private let kVMRegionBasicInfo64: vm_region_flavor_t = 9
-/// `VM_BEHAVIOR_PAGEOUT` (mach/vm_behavior.h).
-private let kVMBehaviorPageout: vm_behavior_t = 6
+/// `VM_REGION_BASIC_INFO_64` (mach/vm_region.h) — символ SDK, не магическое
+/// число (fallback при проблеме импорта в Swift: 9).
+private let kVMRegionBasicInfo64: vm_region_flavor_t = VM_REGION_BASIC_INFO_64
+/// `VM_BEHAVIOR_PAGEOUT` (mach/vm_behavior.h) — символ SDK, `= 11`, «force
+/// page-out of the pages in range (development only)». Fallback при проблеме
+/// импорта: 11. Ни в коем случае не 6 — это `VM_BEHAVIOR_FREE`.
+private let kVMBehaviorPageout: vm_behavior_t = VM_BEHAVIOR_PAGEOUT
 
 private struct MemorystatusPriorityProperties {
     var priority: Int32

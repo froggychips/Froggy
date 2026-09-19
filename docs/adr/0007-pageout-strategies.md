@@ -1,6 +1,6 @@
 # ADR 0007 — Pageout-стратегии: machVM / jetsam / scratch
 
-* **Статус:** Accepted (Mem-2)
+* **Статус:** Accepted (Mem-2) · частично superseded [ADR 0018](0018-pageout-unprivileged-scratch-only.md): дефолт `jetsam` и обещание «без entitlement'ов» отозваны
 * **Дата:** 2026-05-06
 
 ## Контекст

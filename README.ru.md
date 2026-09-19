@@ -51,11 +51,14 @@ Claude Code  ←— stdio / MCP (JSON-RPC) —→  froggy-sre  ←— socket (pr
   `freezeBundleIds` deprecated, маппится в tier-1 для совместимости.
   Подробнее — `docs/adr/0006-reactive-memory-pressure.md`.
 - **Принудительный pageout** после SIGSTOP — `SIGSTOP` сам по себе RAM не
-  возвращает. `PageoutChain` пробует одну из трёх стратегий: `machVM`
-  (`task_for_pid` + `mach_vm_behavior_set(VM_BEHAVIOR_PAGEOUT)`, требует
-  Developer ID + entitlement), `jetsam` (`memorystatus_control` idle-band,
-  default — без entitlement'ов), `scratch` (alloc/memset/free). Fallback
-  по цепочке. Подробнее — `docs/adr/0007-pageout-strategies.md`.
+  возвращает. `PageoutChain` знает три стратегии, но без привилегий работает
+  одна: `scratch` (alloc/memset/free, провокация компрессора) — она и дефолт.
+  `jetsam` (`memorystatus_control` idle-band) требует root или приватный
+  entitlement `com.apple.private.memorystatus`; `machVM` (`task_for_pid` +
+  `mach_vm_behavior_set(VM_BEHAVIOR_PAGEOUT)`) — отключённый SIP и
+  development-ядро. Обе opt-in и откатываются на `scratch`. Подробнее —
+  `docs/adr/0018-pageout-unprivileged-scratch-only.ru.md` (факты) и
+  `docs/adr/0007-pageout-strategies.ru.md` (исходный дизайн).
 - **Default-deny классификация процессов** — заморозить можно только то, что
   лежит под `/Applications/`, `~/Applications/` или `/opt/homebrew/Cellar/`.
   Системные бинарники неприкосновенны.
@@ -202,7 +205,7 @@ Assistant:
   "freezeTier1BundleIds": ["com.spotify.client", "com.hnc.Discord"],
   "freezeTier2BundleIds": ["com.tinyspeck.slackmacgap", "notion.id"],
   "pressureCooldownSeconds": 60,
-  "pageoutStrategy": "jetsam",
+  "pageoutStrategy": "scratch",
   "pageoutScratchMB": 256,
   "mlxWorkerPath": "/usr/local/libexec/FroggyMLXWorker",
   "kvCacheBits": 8,
