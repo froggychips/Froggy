@@ -2,7 +2,6 @@
 .build/
 .swiftpm/
 DerivedData/
-Package.resolved
 *.log
 *.xcodeproj/xcuserdata/
 node_modules/

@@ -28,6 +28,15 @@ concurrency:
 jobs:
   build-test:
     name: Build & test (self-hosted)
+    # Persistent runner с `clean: false` собирает и релизы. PR из форка
+    # = чужой Makefile/скрипты на этой же машине — не пускаем. PR из веток
+    # самого репо и push в main идут как раньше.
+    # Это defense-in-depth, не основная защита: для `pull_request` GitHub
+    # берёт YAML из самого PR, и форк может этот `if` убрать. Основной
+    # барьер — Settings → Actions → General → «Require approval for all
+    # outside collaborators» (у публичного репо по умолчанию хотя бы
+    # «first-time contributors»).
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     runs-on: [self-hosted, macOS, ARM64]
     timeout-minutes: 45
 

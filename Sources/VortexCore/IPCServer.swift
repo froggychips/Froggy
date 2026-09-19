@@ -30,6 +30,18 @@ public actor IPCServer {
     /// Interest track'е. Используется для IPC roundtrip overlay'я.
     private static let poi = OSSignposter(subsystem: "com.froggychips.froggy", category: "PointsOfInterest")
     private static let maxLineBytes = 1 << 20
+    /// Лимит одновременных соединений. Каждое живое соединение держит
+    /// GCD-поток на блокирующем read(2); без потолка клиент того же uid
+    /// мог открыть сотни соединений и не прислать ни байта.
+    private static let maxConnections = 64
+    private static let activeConnections = OSAllocatedUnfairLock(initialState: 0)
+    /// Idle-таймаут ожидания следующей строки запроса и таймаут записи
+    /// (SO_RCVTIMEO / SO_SNDTIMEO). Клиент, переставший читать streaming-ответ
+    /// или держащий соединение без запроса, отваливается сам, а не висит до
+    /// перезапуска демона. Одноразовые клиенты (CLI, froggy-mcp) открывают
+    /// соединение на запрос — их это не касается.
+    private static let readTimeoutSeconds = 60
+    private static let writeTimeoutSeconds = 15
 
     private let socketPath: String
     private let handler: any IPCRequestHandler
@@ -211,6 +223,19 @@ public actor IPCServer {
                 continue
             }
 
+            let active = activeConnections.withLock { count -> Int in
+                count += 1
+                return count
+            }
+            if active > maxConnections {
+                activeConnections.withLock { $0 -= 1 }
+                Self.log.warning("ipc connection limit \(maxConnections, privacy: .public) reached — rejecting peer pid=\(peer.pid, privacy: .public)")
+                writeJSONLine(.failure("too many connections"), to: cfd)
+                close(cfd)
+                continue
+            }
+            applyTimeouts(fd: cfd)
+
             let h = handler
             let peerPid = peer.pid
             Task.detached {
@@ -223,16 +248,19 @@ public actor IPCServer {
     private static func handleConnection(
         fd: Int32, peerPid: pid_t, handler: any IPCRequestHandler
     ) async {
-        defer { close(fd) }
+        defer {
+            close(fd)
+            activeConnections.withLock { $0 -= 1 }
+        }
         var buffer = Data()
-        var chunk = [UInt8](repeating: 0, count: 4096)
         var firstCommandLogged = false
         while !Task.isCancelled {
-            let n = chunk.withUnsafeMutableBufferPointer { ptr -> Int in
-                read(fd, ptr.baseAddress, ptr.count)
-            }
-            if n <= 0 { return }
-            buffer.append(contentsOf: chunk.prefix(n))
+            // Блокирующий read(2) уходит на GCD-поток, а не на cooperative
+            // pool: иначе восемь idle-клиентов занимали бы все потоки
+            // executor'а, и координатор с vision вставали вместе с ними.
+            // nil — EOF, ошибка или SO_RCVTIMEO: соединение закрываем.
+            guard let bytes = await readChunk(fd: fd) else { return }
+            buffer.append(contentsOf: bytes)
             // Срезаем все полные строки, что есть в буфере.
             while let nl = buffer.firstIndex(of: 0x0A) {
                 // `firstIndex` возвращает индекс относительно текущего
@@ -245,13 +273,16 @@ public actor IPCServer {
                 }
                 let line = Data(buffer.prefix(endOffset))
                 buffer.removeSubrange(buffer.startIndex...nl)
-                await processLine(
+                let keepAlive = await processLine(
                     line: line,
                     fd: fd,
                     peerPid: peerPid,
                     firstCommandLogged: &firstCommandLogged,
                     handler: handler
                 )
+                // Ответ не дописан целиком (EPIPE / SO_SNDTIMEO): следующий
+                // JSON приклеился бы к оборванному — закрываем соединение.
+                if !keepAlive { return }
             }
             guard buffer.count <= maxLineBytes else {
                 writeJSONLine(.failure("request too large"), to: fd)
@@ -260,16 +291,17 @@ public actor IPCServer {
         }
     }
 
+    /// Возвращает false, если ответ клиенту не удалось записать целиком —
+    /// соединение после этого нужно закрыть, а не читать следующий запрос.
     private static func processLine(
         line: Data,
         fd: Int32,
         peerPid: pid_t,
         firstCommandLogged: inout Bool,
         handler: any IPCRequestHandler
-    ) async {
+    ) async -> Bool {
         guard let req = try? JSONDecoder().decode(IPCRequest.self, from: line) else {
-            writeJSONLine(.failure("malformed request"), to: fd)
-            return
+            return writeJSONLine(.failure("malformed request"), to: fd)
         }
         // Issue #62: первая команда на соединении логируется с peer pid —
         // даёт audit-trail «кто и когда подключался» без необходимости
@@ -289,28 +321,35 @@ public actor IPCServer {
         if let stream = handler.handleStream(req) {
             do {
                 for try await chunk in stream {
-                    writeJSONLine(chunk, to: fd)
-                    if chunk.final == true { return }
+                    // Клиент ушёл (EPIPE) или перестал читать (SO_SNDTIMEO) —
+                    // выходим из цикла; выход роняет итератор, стрим отменяется
+                    // и producer перестаёт генерировать в никуда.
+                    guard writeJSONLine(chunk, to: fd) else { return false }
+                    if chunk.final == true { return true }
                 }
                 // Stream закончился без явного `final` — отправим завершающий маркер.
                 var trailer = IPCResponse()
                 trailer.ok = true
                 trailer.final = true
-                writeJSONLine(trailer, to: fd)
+                return writeJSONLine(trailer, to: fd)
             } catch {
-                writeJSONLine(.failure(String(describing: error)), to: fd)
+                return writeJSONLine(.failure(String(describing: error)), to: fd)
             }
-            return
         }
         // One-shot путь.
         let response = await handler.handle(req)
-        writeJSONLine(response, to: fd)
+        return writeJSONLine(response, to: fd)
     }
 
-    private static func writeJSONLine(_ response: IPCResponse, to fd: Int32) {
-        guard var data = try? JSONEncoder().encode(response) else { return }
+    /// Возвращает false, если строку не удалось дописать целиком (EPIPE,
+    /// таймаут записи, ошибка кодирования) — вызывающий streaming-цикл по
+    /// этому признаку прекращает производить ответ.
+    @discardableResult
+    private static func writeJSONLine(_ response: IPCResponse, to fd: Int32) -> Bool {
+        guard var data = try? JSONEncoder().encode(response) else { return false }
         data.append(0x0A)
-        _ = data.withUnsafeBytes { ptr -> Int in
+        let total = data.count
+        let written = data.withUnsafeBytes { ptr -> Int in
             guard let base = ptr.baseAddress else { return 0 }
             var written = 0
             while written < ptr.count {
@@ -319,6 +358,41 @@ public actor IPCServer {
                 written += w
             }
             return written
+        }
+        return written == total
+    }
+
+    // MARK: - Blocking I/O helpers
+
+    /// Один read(2) на GCD-потоке. nil — EOF, ошибка или истёк SO_RCVTIMEO
+    /// (read вернёт -1/EAGAIN).
+    nonisolated private static func readChunk(fd: Int32) async -> [UInt8]? {
+        await withCheckedContinuation { (cont: CheckedContinuation<[UInt8]?, Never>) in
+            DispatchQueue.global(qos: .utility).async {
+                var chunk = [UInt8](repeating: 0, count: 4096)
+                let n = chunk.withUnsafeMutableBufferPointer { ptr -> Int in
+                    read(fd, ptr.baseAddress, ptr.count)
+                }
+                if n <= 0 {
+                    cont.resume(returning: nil)
+                } else {
+                    cont.resume(returning: Array(chunk[0..<n]))
+                }
+            }
+        }
+    }
+
+    /// SO_RCVTIMEO / SO_SNDTIMEO на принятом соединении. Ошибку setsockopt
+    /// не считаем фатальной — без таймаутов соединение работает как раньше.
+    nonisolated private static func applyTimeouts(fd: Int32) {
+        var rcv = timeval(tv_sec: readTimeoutSeconds, tv_usec: 0)
+        var snd = timeval(tv_sec: writeTimeoutSeconds, tv_usec: 0)
+        let len = socklen_t(MemoryLayout<timeval>.size)
+        if setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &rcv, len) != 0 {
+            Self.log.warning("setsockopt(SO_RCVTIMEO) failed errno=\(errno, privacy: .public)")
+        }
+        if setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &snd, len) != 0 {
+            Self.log.warning("setsockopt(SO_SNDTIMEO) failed errno=\(errno, privacy: .public)")
         }
     }
 }
