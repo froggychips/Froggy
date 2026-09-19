@@ -90,6 +90,22 @@ public actor VortexCoordinator: WorkspaceTerminationWatcher.Sink {
     /// Issue #64: lifecycle-состояние. См. `CoordinatorState`.
     private var state: CoordinatorState = .idle
 
+    /// Поколение политики. Инкрементируется на каждое событие, которое
+    /// делает уже начатый обход `freezeTier` неактуальным: `thawAll`
+    /// (в т.ч. emergencyThaw на Off/ADR 0017 и на willSleep) и
+    /// `stopMonitoring`. `freezeTier` фиксирует значение на входе и
+    /// перепроверяет после каждого `await`: между `finder.pids` и
+    /// `freezeProcess` проходят actor-hop'ы, за которые пользователь мог
+    /// выключить freeze, а система — уйти в sleep. Без этого обход,
+    /// начатый до Off, доморозит остаток tier'а уже после emergencyThaw.
+    private var policyGeneration: UInt64 = 0
+
+    /// Pid'ы, для которых `freezeProcess` сейчас висит на await. Пока pid
+    /// здесь, новый обход его не трогает (он ещё не в tier-set'е, поэтому
+    /// «skip already-frozen» его не поймал бы), а откат старого обхода не
+    /// разморозит то, что успел заморозить новый.
+    private var inFlightFreezes: Set<Int32> = []
+
     public init(
         mlx: MLXSupervisor,
         vortex: any VortexFreezing,
@@ -174,6 +190,7 @@ public actor VortexCoordinator: WorkspaceTerminationWatcher.Sink {
 
     public func stopMonitoring() async {
         transition(to: .stopping)
+        policyGeneration &+= 1
         listenTask?.cancel()
         listenTask = nil
         workspaceTask?.cancel()
@@ -243,6 +260,11 @@ public actor VortexCoordinator: WorkspaceTerminationWatcher.Sink {
         transition(to: .degraded(reason: reason))
     }
 
+    /// Test-hook: текущий закешированный frontmost pid. Нужен тестам, которые
+    /// меняют frontmost ВО ВРЕМЯ `await freezeProcess` и должны дождаться
+    /// обработки события, не полагаясь на sleep.
+    internal func _testFrontmostPid() -> Int32? { frontmostPid }
+
     /// Переключатель master switch (ADR 0017).
     /// false → cancel pending thawTask, emergencyThaw всех замороженных,
     /// дальнейшие pressure-эвенты игнорятся в `applyPolicy`.
@@ -265,6 +287,9 @@ public actor VortexCoordinator: WorkspaceTerminationWatcher.Sink {
     /// Полная оттепель через coordinator, чтобы in-memory tier-set'ы,
     /// VortexActor и audit trail оставались синхронными.
     public func thawAll(reason: String = "manual") async {
+        // Любой обход freezeTier, который сейчас висит на await, после
+        // возврата увидит смену поколения и не доморозит остаток tier'а.
+        policyGeneration &+= 1
         thawTask?.cancel()
         thawTask = nil
         await thawTier(.tier2, reason: reason)
@@ -384,11 +409,13 @@ public actor VortexCoordinator: WorkspaceTerminationWatcher.Sink {
             // под freeze. `freezeTier` идемпотентен (skip already-frozen
             // + frontmost-veto), безопасно вызывать повторно.
             guard !sleeping, freezingEnabled, let bundleId else { break }
+            // Поколение фиксируем ДО await — см. `policyGeneration`.
+            let generation = policyGeneration
             let level = await monitor.currentLevel()
             if tier1BundleIds.contains(bundleId), level >= .warning {
-                await freezeTier(.tier1)
+                await freezeTier(.tier1, generation: generation)
             } else if tier2BundleIds.contains(bundleId), level >= .critical {
-                await freezeTier(.tier2)
+                await freezeTier(.tier2, generation: generation)
             }
         default:
             // Deactivate/terminate/screen-events — не наша забота
@@ -438,14 +465,18 @@ public actor VortexCoordinator: WorkspaceTerminationWatcher.Sink {
         }
 
         let pressureReason = "pressure_\(level.rawValue)"
+        // Одно поколение на весь обработчик: thawAll во время обхода tier-1
+        // должен прервать и tier-2, а не только текущий tier (иначе tier-2
+        // взял бы уже новое поколение и доморозил после Off/willSleep).
+        let generation = policyGeneration
         switch level {
         case .warning:
             thawTask?.cancel(); thawTask = nil
-            await freezeTier(.tier1, reason: pressureReason)
+            await freezeTier(.tier1, generation: generation, reason: pressureReason)
         case .critical:
             thawTask?.cancel(); thawTask = nil
-            await freezeTier(.tier1, reason: pressureReason)
-            await freezeTier(.tier2, reason: pressureReason)
+            await freezeTier(.tier1, generation: generation, reason: pressureReason)
+            await freezeTier(.tier2, generation: generation, reason: pressureReason)
         case .normal:
             // Tier-2 отпускаем сразу, tier-1 — через задержку, чтобы дать
             // системе ещё чуть-чуть «выдохнуть» перед возвращением фоновых
@@ -467,18 +498,35 @@ public actor VortexCoordinator: WorkspaceTerminationWatcher.Sink {
         case tier2
     }
 
-    private func freezeTier(_ tier: Tier, reason: String = "manual") async {
+    /// `generation` — поколение политики, зафиксированное вызывающим ДО его
+    /// первого await (см. `policyGeneration`); один обработчик передаёт одно
+    /// и то же значение во все свои обходы.
+    private func freezeTier(_ tier: Tier, generation: UInt64, reason: String = "manual") async {
         let bundleIds = tier == .tier1 ? tier1BundleIds : tier2BundleIds
         // Issue #63: ходим per-bundleId чтобы знать соответствие pid→bundleId
         // для audit-записи. ProcessFinder.pids(forBundleIds:) уплощает массив
         // и теряет это соответствие. Стоимость 2-3 NSWorkspace-вызова на tier —
         // дешёво по сравнению с самим SIGSTOP.
         let tierName = tier == .tier1 ? "1" : "2"
+        // Обход, который уже неактуален (Off/sleep за время предыдущего
+        // tier'а или pacerAdjuster), не начинаем вовсе.
+        if let stale = policyStaleReason(generation: generation) {
+            Self.log.info("freeze tier=\(tierName, privacy: .public) not started: \(stale, privacy: .public)")
+            return
+        }
         for bundleId in bundleIds {
             let pids = await finder.pids(forBundleIds: [bundleId])
             for pid in pids {
-                // Skip уже-замороженные в любом из tier'ов.
+                // За `await finder.pids` или за предыдущий freezeProcess
+                // условия могли измениться — перепроверяем перед КАЖДЫМ SIGSTOP.
+                if let stale = policyStaleReason(generation: generation) {
+                    Self.log.info("freeze tier=\(tierName, privacy: .public) traversal aborted: \(stale, privacy: .public)")
+                    return
+                }
+                // Skip уже-замороженные в любом из tier'ов и те, чей freeze
+                // прямо сейчас выполняет другой обход.
                 if tier1Frozen.contains(pid) || tier2Frozen.contains(pid) { continue }
+                if inFlightFreezes.contains(pid) { continue }
                 // Frontmost-veto (ADR 0015): pid frontmost-app никогда не морозим.
                 if let frontmostPid, pid == frontmostPid {
                     Self.log.info("freeze pid=\(pid, privacy: .public) tier=\(tierName, privacy: .public) vetoed: frontmost")
@@ -488,26 +536,66 @@ public actor VortexCoordinator: WorkspaceTerminationWatcher.Sink {
                     )
                     continue
                 }
+                inFlightFreezes.insert(pid)
                 do {
                     try await vortex.freezeProcess(pid: pid)
-                    switch tier {
-                    case .tier1: tier1Frozen.insert(pid)
-                    case .tier2: tier2Frozen.insert(pid)
-                    }
-                    await auditLog?.record(
-                        op: "freeze", pid: pid, bundleId: bundleId,
-                        tier: tierName, reason: reason, outcome: "ok"
-                    )
                 } catch {
+                    inFlightFreezes.remove(pid)
                     Self.log.warning("freeze pid=\(pid) tier=\(tierName, privacy: .public) skipped: \(error.localizedDescription, privacy: .public)")
                     await auditLog?.record(
                         op: "freeze", pid: pid, bundleId: bundleId,
                         tier: tierName, reason: reason,
                         outcome: "failed:\(error.localizedDescription)"
                     )
+                    continue
                 }
+                // За время `await freezeProcess` (SIGSTOP + journal + pageout)
+                // пользователь мог активировать это приложение, выключить
+                // freeze, а система — уйти в sleep. Обработчик `frontmostChanged`
+                // этот pid ещё не видит (он не в tier-set'е), поэтому откат
+                // делаем здесь: SIGCONT сразу, в tier-set не вставляем.
+                if let revert = revertReason(pid: pid, generation: generation) {
+                    // pid остаётся in-flight до конца SIGCONT: новый обход не
+                    // должен успеть заморозить его между решением и откатом.
+                    await vortex.thawProcess(pid: pid)
+                    inFlightFreezes.remove(pid)
+                    Self.log.notice("freeze pid=\(pid, privacy: .public) tier=\(tierName, privacy: .public) reverted: \(revert, privacy: .public)")
+                    await auditLog?.record(
+                        op: "freeze", pid: pid, bundleId: bundleId,
+                        tier: tierName, reason: reason, outcome: "reverted:\(revert)"
+                    )
+                    // Frontmost-откат локален для одного pid; остальное —
+                    // признак того, что весь обход больше не нужен.
+                    if revert == "frontmost" { continue }
+                    return
+                }
+                inFlightFreezes.remove(pid)
+                switch tier {
+                case .tier1: tier1Frozen.insert(pid)
+                case .tier2: tier2Frozen.insert(pid)
+                }
+                await auditLog?.record(
+                    op: "freeze", pid: pid, bundleId: bundleId,
+                    tier: tierName, reason: reason, outcome: "ok"
+                )
             }
         }
+    }
+
+    /// nil — обход `freezeTier` ещё актуален; иначе причина прервать его.
+    private func policyStaleReason(generation: UInt64) -> String? {
+        if generation != policyGeneration { return "generation_changed" }
+        if !freezingEnabled { return "freezing_disabled" }
+        if sleeping { return "sleeping" }
+        return nil
+    }
+
+    /// Причина откатить только что выполненный freeze: обход устарел
+    /// (см. `policyStaleReason`) или pid за время await стал frontmost.
+    private func revertReason(pid: Int32, generation: UInt64) -> String? {
+        if let stale = policyStaleReason(generation: generation) { return stale }
+        if let frontmostPid, pid == frontmostPid { return "frontmost" }
+        return nil
     }
 
     private func thawTier(_ tier: Tier, reason: String = "manual") async {

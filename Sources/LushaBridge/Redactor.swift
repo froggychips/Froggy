@@ -46,8 +46,17 @@ public struct Redactor: Sendable {
         return Self.redactCreditCards(in: s)
     }
 
+    /// OCR отдаёт экран построчно, а секреты живут поперёк строк: PEM-блок
+    /// — это три и более строк, `password:` часто стоит НАД значением.
+    /// Построчный `map` не матчил ни одно из них. Поэтому строки склеиваются
+    /// через `\n`, правила применяются к целому блоку (`\s` в
+    /// NSRegularExpression матчит и перевод строки — label-правила ловят
+    /// значение на следующей строке сами), результат режется обратно.
+    /// Число строк может уменьшиться: многострочный матч схлопывается
+    /// в один маркер. Вызывающие принимают `[String]` любой длины.
     public func redact(_ lines: [String]) -> [String] {
-        lines.map(redact)
+        guard !lines.isEmpty else { return [] }
+        return redact(lines.joined(separator: "\n")).components(separatedBy: "\n")
     }
 
     // MARK: - Built-in rules
@@ -76,15 +85,19 @@ public struct Redactor: Sendable {
             replacement: "[REDACTED-BEARER]",
             caseInsensitive: true
         ),
+        // Значение в кавычках берём целиком (`password="correct horse
+        // battery staple"` — иначе `\S+` оставлял хвост после первого
+        // пробела). Внутри кавычек перевод строки не допускаем, чтобы
+        // незакрытая кавычка не съела следующую OCR-строку.
         .init(
             name: "password-label",
-            pattern: "(password|passwd|pwd)\\s*[:=]\\s*\\S+",
+            pattern: "(password|passwd|pwd)\\s*[:=]\\s*(?:\"[^\"\\n]*\"|'[^'\\n]*'|\\S+)",
             replacement: "$1=[REDACTED]",
             caseInsensitive: true
         ),
         .init(
             name: "secret-label",
-            pattern: "(api[_-]?key|secret|token)\\s*[:=]\\s*[\"']?[A-Za-z0-9_\\-\\.]{8,}[\"']?",
+            pattern: "(api[_-]?key|secret|token)\\s*[:=]\\s*(?:\"[^\"\\n]*\"|'[^'\\n]*'|[\"']?[A-Za-z0-9_\\-\\.]{8,}[\"']?)",
             replacement: "$1=[REDACTED]",
             caseInsensitive: true
         ),
@@ -113,8 +126,12 @@ public struct Redactor: Sendable {
 
     // MARK: - Credit cards (Luhn-validated, отдельно от regex-rules)
 
+    /// Разделители групп: пробел, дефис и «типографские» пробелы, которые
+    /// Vision OCR ставит вместо обычного (NBSP U+00A0, narrow NBSP U+202F,
+    /// thin space U+2009). Перевод строки не входит — номер на двух строках
+    /// не склеиваем.
     private static let cardCandidatePattern: NSRegularExpression? = {
-        try? NSRegularExpression(pattern: "\\b\\d[\\d \\-]{11,21}\\d\\b")
+        try? NSRegularExpression(pattern: "\\b\\d[\\d \\u00A0\\u202F\\u2009\\-]{11,21}\\d\\b")
     }()
 
     private static func redactCreditCards(in text: String) -> String {
@@ -165,7 +182,12 @@ private struct CompiledRule: Sendable {
     let replacement: String
 
     init?(_ rule: RedactionRule) {
-        var options: NSRegularExpression.Options = []
+        // OCR-строки редактируются одним склеенным блоком (см. `redact(_ lines:)`),
+        // поэтому `^`/`$` должны матчить границы строк, а не всего блока —
+        // иначе пользовательские правила вида `^ACME-\d{6}$` из
+        // redaction-rules.json перестали бы ловить отдельную строку.
+        // Встроенные правила якорей не содержат, для них это no-op.
+        var options: NSRegularExpression.Options = [.anchorsMatchLines]
         if rule.caseInsensitive { options.insert(.caseInsensitive) }
         guard let regex = try? NSRegularExpression(pattern: rule.pattern, options: options) else {
             return nil

@@ -111,4 +111,74 @@ final class RedactorTests: XCTestCase {
         XCTAssertTrue(out.allSatisfy { $0.contains("[REDACTED-AWS-KEY]") })
         XCTAssertLessThan(elapsed, 2.0, "1000 redactions took \(elapsed)s — slower than expected")
     }
+
+    // MARK: - Многострочные секреты (review 2026-09-19)
+
+    /// Vision OCR отдаёт PEM-блок построчно. До фикса `redact(_ lines:)` шёл
+    /// `map`-ом, и многострочный паттерн не матчился ни на одной строке —
+    /// тело ключа уезжало в state.json и ContextStore.
+    func testRedactsPEMSplitAcrossOCRLines() {
+        let lines = [
+            "some header",
+            "-----BEGIN RSA PRIVATE KEY-----",
+            "MIIEpAIBAAKCAQEA2sgN",
+            "-----END RSA PRIVATE KEY-----",
+            "footer",
+        ]
+        let out = r.redact(lines)
+        XCTAssertFalse(out.contains { $0.contains("MIIE") }, "тело ключа утекло: \(out)")
+        XCTAssertTrue(out.contains { $0.contains("[REDACTED-PEM]") })
+        XCTAssertEqual(out.first, "some header")
+        XCTAssertEqual(out.last, "footer")
+    }
+
+    /// Метка на одной OCR-строке, значение — на следующей.
+    func testRedactsPasswordValueOnNextLine() {
+        let out = r.redact(["password:", "Hunter2!"])
+        XCTAssertFalse(out.contains { $0.contains("Hunter2") }, "got: \(out)")
+        XCTAssertTrue(out.contains { $0.contains("[REDACTED]") })
+    }
+
+    /// Значение в кавычках с пробелами берётся целиком, а не до первого пробела.
+    func testRedactsQuotedPasswordWithSpaces() {
+        let out = r.redact("password=\"correct horse battery staple\"")
+        XCTAssertFalse(out.contains("horse"), "got: \(out)")
+        XCTAssertFalse(out.contains("staple"), "got: \(out)")
+        XCTAssertTrue(out.contains("[REDACTED]"))
+    }
+
+    /// OCR часто ставит NBSP вместо пробела между группами цифр.
+    func testRedactsCreditCardWithNonBreakingSpaces() {
+        let out = r.redact("card 4242\u{00A0}4242\u{00A0}4242\u{00A0}4242 expires soon")
+        XCTAssertTrue(out.contains("[REDACTED-CARD]"), "got: \(out)")
+    }
+
+    /// Без многострочных матчей число строк сохраняется 1:1.
+    func testLineArrayKeepsLineCountWithoutMultilineMatches() {
+        let lines = ["a", "b", "key=AKIAIOSFODNN7EXAMPLE", "d"]
+        let out = r.redact(lines)
+        XCTAssertEqual(out.count, 4)
+        XCTAssertEqual(out[0], "a")
+        XCTAssertEqual(out[3], "d")
+        XCTAssertTrue(out[2].contains("[REDACTED-AWS-KEY]"))
+    }
+
+    func testEmptyLineArray() {
+        XCTAssertEqual(r.redact([String]()), [])
+    }
+
+    /// Пользовательские правила с якорями `^…$` (redaction-rules.json) должны
+    /// матчить отдельную OCR-строку и после перехода на редактирование
+    /// склеенного блока — за это отвечает `.anchorsMatchLines`.
+    func testAnchoredUserRuleMatchesSingleLineInsideBlock() {
+        let rules = Redactor.builtInRules + [
+            RedactionRule(name: "acme-id", pattern: "^ACME-\\d{6}$", replacement: "[REDACTED-ACME]")
+        ]
+        let custom = Redactor(rules: rules)
+        let out = custom.redact(["first line", "ACME-123456", "last line"])
+        XCTAssertEqual(out, ["first line", "[REDACTED-ACME]", "last line"])
+        // Якорь по-прежнему не матчит подстроку внутри строки.
+        let inline = custom.redact(["ticket ACME-123456 open"])
+        XCTAssertEqual(inline, ["ticket ACME-123456 open"])
+    }
 }
