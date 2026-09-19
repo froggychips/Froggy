@@ -135,6 +135,9 @@ public actor FreezeStatsStore {
     /// Топ-N bundle_id по медиане `rss_before - rss_after` за последние
     /// `daysBack` дней.
     public func topByMedianFreed(limit: Int = 10, daysBack: Int = 7) throws -> [AggregatedStats] {
+        // Второй пояс после проверки в IPC-handler'е: `prefix(limit)` с
+        // отрицательным аргументом — precondition failure всего демона.
+        guard limit > 0 else { return [] }
         // SQLite не имеет встроенного MEDIAN — считаем в памяти после
         // выборки. Для типичного 7-дневного окна это сотни-тысячи строк,
         // что окей.

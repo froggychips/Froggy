@@ -63,13 +63,15 @@ ADR 0007 описывает три стратегии pageout. Стратеги�
    делается через `csrutil disable` в Recovery — не для прода.
 
 В обоих случаях `pageoutStrategy=machVM` нужно явно прописать в
-`config.json`. Без этого `PageoutChain` автоматически откатывается на
-`jetsam` → `scratch` (см. ADR 0007). Дефолт `jetsam` работает с любой
-подписью (даже adhoc) и не требует никаких entitlement'ов.
+`config.json`. Дефолт — `scratch`: единственная стратегия без привилегий.
+`jetsam` **не** работает без root или entitlement
+`com.apple.private.memorystatus` — `memorystatus_control` возвращает EPERM
+(см. ADR 0018); прежняя редакция этого README обещала обратное.
 
-**TL;DR:** на стандартной поставке ставьте `pageoutStrategy=jetsam`
-(default). `machVM` — только если у вас одобренный Apple
-provisioning profile или вы у себя в dev-окружении с SIP off.
+**TL;DR:** на стандартной поставке оставляйте `pageoutStrategy=scratch`
+(default). `machVM` — только если у вас одобренный Apple provisioning
+profile или вы у себя в dev-окружении с SIP off; `jetsam` — только под
+root или с приватным entitlement.
 
 ## 3. Notarize
 

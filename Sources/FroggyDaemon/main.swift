@@ -36,13 +36,24 @@ struct FroggyDaemon {
             exit(2)
         }
 
-        // Persisted config + CLI/env overrides.
-        var config = (try? FroggyConfig.load()) ?? FroggyConfig()
-        if let v = cli.modelPath { config.modelPath = v }
-        if let v = cli.captureIntervalSeconds { config.captureIntervalSeconds = v }
+        // Singleton: эксклюзивный flock на daemon.lock ДО любых побочных
+        // эффектов. Раньше второй экземпляр (ручной запуск при живом
+        // LaunchAgent) успевал сделать `recover()` — SIGKILL воркерам ЧУЖОГО
+        // демона и очистка frozen.pids, — а потом на `alreadyRunning` от IPC
+        // только логировал и продолжал крутить vision/monitor вторым
+        // экземпляром.
+        acquireSingletonLockOrExit()
 
-        // Сначала восстанавливаемся: если предыдущий запуск умер с
-        // зависшими SIGSTOP-pids — отпускаем их сейчас.
+        // Lock держат только экземпляры этой версии. Демон СТАРОЙ версии lock
+        // не берёт — значит, до recover() ещё и пробуем его сокет по дефолтному
+        // пути (конфиг пока не читали). Живой listener = чужой экземпляр,
+        // выходим EX_TEMPFAIL, frozen.pids не трогаем.
+        exitIfAnotherDaemonListens(on: FroggyConfig().ipcSocketPath)
+
+        // Recovery — ДО конфига и независимо от него: если предыдущий демон
+        // умер с SIGSTOP-нутыми приложениями, а config.json при этом битый,
+        // иначе каждый старт выходил бы с EX_CONFIG, приложения так и стояли
+        // бы замороженными, а воркеры — сиротами. Recover'у конфиг не нужен.
         let pidStore = FrozenPidsStore()
         let recovered = await pidStore.recover()
         if recovered > 0 {
@@ -56,6 +67,36 @@ struct FroggyDaemon {
         if recovered > 0 {
             await auditLog.record(op: "thawAll", reason: "boot_recovery",
                                   outcome: "recovered:\(recovered)")
+        }
+
+        // Persisted config + CLI/env overrides. Битый JSON — НЕ повод молча
+        // жить на дефолтах: там freeze включён и стандартные allowlist'ы,
+        // то есть ровно то, что пользователь мог выключить в файле.
+        // Отсутствие файла — штатный дефолт (`load` сам так делает).
+        var config: FroggyConfig
+        do {
+            config = try FroggyConfig.load()
+        } catch {
+            let path = FroggyConfig.defaultURL.path
+            log.error("config load failed \(path, privacy: .public): \(String(describing: error), privacy: .public)")
+            FileHandle.standardError.write(Data("FroggyDaemon: cannot load config \(path): \(error)\n".utf8))
+            exit(exitConfig)
+        }
+        if let v = cli.modelPath { config.modelPath = v }
+        if let v = cli.captureIntervalSeconds { config.captureIntervalSeconds = v }
+        // Диапазоны — после overrides, чтобы CLI-флаг тоже не мог подсунуть
+        // `--capture-interval 0`. Невалидный конфиг = EX_CONFIG, не crash-loop
+        // на precondition'е где-то в ContextStore.
+        do {
+            try config.validate()
+        } catch {
+            log.error("config invalid: \(String(describing: error), privacy: .public)")
+            FileHandle.standardError.write(Data("FroggyDaemon: invalid config: \(error)\n".utf8))
+            exit(exitConfig)
+        }
+        // Конфиг мог переопределить путь сокета — повторяем probe по нему.
+        if config.ipcSocketPath != FroggyConfig().ipcSocketPath {
+            exitIfAnotherDaemonListens(on: config.ipcSocketPath)
         }
 
         let pageoutChain = PageoutChain(
@@ -187,22 +228,9 @@ struct FroggyDaemon {
 
         installSignalHandlers(coordinator: coordinator, audioSupervisor: audioSupervisor)
 
-        if config.freezingEnabled, let modelPath = config.modelPath {
-            do {
-                try await coordinator.loadModel(modelPath: modelPath)
-                log.info("model loaded: \(modelPath, privacy: .public)")
-            } catch {
-                log.error("model load failed: \(error.localizedDescription, privacy: .public)")
-            }
-        } else if !config.freezingEnabled {
-            // ADR 0017: при freezingEnabled=false автозагрузку модели на старте
-            // тоже пропускаем — Off-state означает «daemon в idle ~50 MB».
-            // User явно включит через MenuBar On + Load.
-            log.notice("freezing disabled — model autoload skipped (idle mode)")
-        } else {
-            log.notice("no model path configured; daemon runs without LLM")
-        }
-
+        // IPC поднимаем ДО автозагрузки модели: во время долгого loadModel
+        // MenuBar/CLI уже видят status (`starting`), а при неудаче старта
+        // сокета мы ещё ничего тяжёлого не запустили.
         let handler = DaemonIPCHandler(
             coordinator: coordinator,
             vortex: vortex,
@@ -220,7 +248,37 @@ struct FroggyDaemon {
         do {
             try await ipc.start()
         } catch {
-            log.error("IPC start failed: \(error.localizedDescription, privacy: .public)")
+            // Раньше — только лог, и демон продолжал работать без IPC (а при
+            // `alreadyRunning` — вторым экземпляром рядом с живым). Без
+            // сокета демон бесполезен: чистим то, что успели поднять, и
+            // выходим EX_TEMPFAIL. При KeepAlive.SuccessfulExit=false launchd
+            // перезапустит нас с throttle — когда владелец сокета уйдёт,
+            // следующий старт пройдёт.
+            log.error("IPC start failed: \(error.localizedDescription, privacy: .public) — exiting")
+            FileHandle.standardError.write(Data("FroggyDaemon: IPC start failed: \(error)\n".utf8))
+            // Сначала глушим мониторинг: иначе pressure/workspace-задачи через
+            // свой `await` могут заморозить кого-то уже ПОСЛЕ emergencyThaw().
+            await coordinator.stopMonitoring()
+            await audioSupervisor.shutdown()
+            await coordinator.unloadModel()
+            await coordinator.emergencyThaw()
+            exit(exitTempFail)
+        }
+
+        if config.freezingEnabled, let modelPath = config.modelPath {
+            do {
+                try await coordinator.loadModel(modelPath: modelPath)
+                log.info("model loaded: \(modelPath, privacy: .public)")
+            } catch {
+                log.error("model load failed: \(error.localizedDescription, privacy: .public)")
+            }
+        } else if !config.freezingEnabled {
+            // ADR 0017: при freezingEnabled=false автозагрузку модели на старте
+            // тоже пропускаем — Off-state означает «daemon в idle ~50 MB».
+            // User явно включит через MenuBar On + Load.
+            log.notice("freezing disabled — model autoload skipped (idle mode)")
+        } else {
+            log.notice("no model path configured; daemon runs without LLM")
         }
 
         let captureTask = Task { await vision.startCapture() }
@@ -268,6 +326,54 @@ struct FroggyDaemon {
         await reactiveFinder.stop()
         await coordinator.emergencyThaw()
         await ipc.stop()
+    }
+
+    /// `EX_TEMPFAIL` из sysexits(3): «временно не могу, попробуй позже» —
+    /// ровно семантика «другой экземпляр уже работает».
+    private static let exitTempFail: Int32 = 75
+    /// `EX_CONFIG` из sysexits(3): ошибка конфигурации.
+    private static let exitConfig: Int32 = 78
+
+    /// Эксклюзивный `flock(LOCK_EX|LOCK_NB)` на
+    /// `~/Library/Application Support/Froggy/daemon.lock`. Дескриптор
+    /// намеренно не закрываем и не храним: flock живёт ровно до exit
+    /// процесса, а `O_CLOEXEC` не даёт воркерам (child-процессам) унаследовать
+    /// его и удерживать lock после смерти демона. При контенции — EX_TEMPFAIL:
+    /// launchd (KeepAlive.SuccessfulExit=false) перезапустит с throttle, и это
+    /// ожидаемо — пока чужой экземпляр держит lock, нам здесь делать нечего.
+    private static func acquireSingletonLockOrExit() {
+        let dir = FroggyConfig.supportDirectory
+        try? FileManager.default.createDirectory(
+            at: dir,
+            withIntermediateDirectories: true,
+            attributes: [.posixPermissions: 0o700]
+        )
+        let lockPath = dir.appendingPathComponent("daemon.lock").path
+        let fd = open(lockPath, O_RDWR | O_CREAT | O_CLOEXEC, 0o600)
+        guard fd >= 0 else {
+            let err = errno
+            log.error("cannot open singleton lock \(lockPath, privacy: .public): errno=\(err)")
+            FileHandle.standardError.write(Data("FroggyDaemon: cannot open lock file \(lockPath) (errno=\(err))\n".utf8))
+            exit(exitTempFail)
+        }
+        if flock(fd, LOCK_EX | LOCK_NB) != 0 {
+            let err = errno
+            log.error("another FroggyDaemon holds the lock \(lockPath, privacy: .public) (errno=\(err)) — exiting")
+            FileHandle.standardError.write(Data("FroggyDaemon: another FroggyDaemon holds the lock (\(lockPath)); exiting\n".utf8))
+            exit(exitTempFail)
+        }
+        // fd остаётся открытым до конца жизни процесса — это и есть lock.
+    }
+
+    /// Probe чужого IPC-сокета: если по `path` кто-то слушает — это живой
+    /// демон (в том числе старой версии, не знающей про daemon.lock).
+    /// Выходим EX_TEMPFAIL, не трогая frozen.pids и воркеры. Stale-файл без
+    /// listener'а — не помеха: `IPCServer.start()` его сам снесёт.
+    private static func exitIfAnotherDaemonListens(on path: String) {
+        guard IPCServer.canConnect(to: path) else { return }
+        log.error("another daemon is listening on \(path, privacy: .public) — exiting")
+        FileHandle.standardError.write(Data("FroggyDaemon: another daemon is listening on \(path); exiting\n".utf8))
+        exit(exitTempFail)
     }
 
     /// Перехватывает SIGINT/SIGTERM. Async-обработчик вызывает
@@ -648,8 +754,14 @@ struct DaemonIPCHandler: IPCRequestHandler, Sendable {
             guard let store = freezeStats else {
                 return .failure("freeze ranking telemetry disabled (config.freezeRankingEnabled=false)")
             }
+            // `maxTokens` переиспользуется как «top N». Отрицательное значение
+            // раньше доезжало до `prefix(-1)` → precondition failure всего
+            // демона от одного синтаксически корректного JSON-запроса.
+            let limit = request.maxTokens ?? 10
+            guard (1...500).contains(limit) else {
+                return .failure("maxTokens must be 1...500 (got \(limit))")
+            }
             do {
-                let limit = request.maxTokens ?? 10 // переиспользуем поле как «top N»
                 let stats = try await store.topByMedianFreed(limit: limit, daysBack: 7)
                 var r = IPCResponse()
                 r.ok = true
@@ -792,7 +904,12 @@ struct DaemonIPCHandler: IPCRequestHandler, Sendable {
                         r.ok = true
                         r.text = event.text
                         r.speaker = event.speaker
-                        r.final = event.isFinal
+                        // `final` здесь НЕ ставим: для IPCServer/IPCClient это
+                        // конец стрима, и раньше `froggy listen-stream`
+                        // обрывался на первой законченной фразе. Финальность
+                        // сегмента едет отдельным полем; стрим закрывает
+                        // `continuation.finish()` → сервер шлёт trailer.
+                        r.segmentFinal = event.isFinal
                         continuation.yield(r)
                     }
                     continuation.finish()

@@ -226,7 +226,7 @@ All fields are optional and have defaults:
   "freezeTier1BundleIds": ["com.spotify.client", "com.hnc.Discord"],
   "freezeTier2BundleIds": ["com.tinyspeck.slackmacgap", "notion.id"],
   "pressureCooldownSeconds": 60,
-  "pageoutStrategy": "jetsam",
+  "pageoutStrategy": "scratch",
   "pageoutScratchMB": 256,
   "mlxWorkerPath": "/usr/local/libexec/FroggyMLXWorker",
   "kvCacheBits": 8,
@@ -240,6 +240,13 @@ All fields are optional and have defaults:
 CLI flags (`--model-path`, `--capture-interval`) and environment variables
 (`FROGGY_MODEL_PATH`, `FROGGY_CAPTURE_INTERVAL`) override values from the
 file.
+
+Malformed JSON or an out-of-range value (e.g. `"contextWindowSize": 0`,
+`"kvCacheBits": 6`) makes the daemon exit with code 78 (`EX_CONFIG`) and
+a one-line reason on stderr / in the unified log. It never silently falls
+back to defaults — defaults have freezing **on**, which may be exactly what
+you turned off. A second daemon instance exits with code 75 (`EX_TEMPFAIL`)
+instead of touching the first one's workers.
 
 ## IPC commands
 

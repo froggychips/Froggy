@@ -114,7 +114,7 @@ public actor IPCServer {
 
     // MARK: - Helpers
 
-    nonisolated private static func canConnect(to path: String) -> Bool {
+    nonisolated public static func canConnect(to path: String) -> Bool {
         let fd = socket(AF_UNIX, SOCK_STREAM, 0)
         guard fd >= 0 else { return false }
         defer { close(fd) }

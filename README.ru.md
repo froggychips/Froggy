@@ -202,7 +202,7 @@ Assistant:
   "freezeTier1BundleIds": ["com.spotify.client", "com.hnc.Discord"],
   "freezeTier2BundleIds": ["com.tinyspeck.slackmacgap", "notion.id"],
   "pressureCooldownSeconds": 60,
-  "pageoutStrategy": "jetsam",
+  "pageoutStrategy": "scratch",
   "pageoutScratchMB": 256,
   "mlxWorkerPath": "/usr/local/libexec/FroggyMLXWorker",
   "kvCacheBits": 8,
@@ -216,6 +216,13 @@ Assistant:
 CLI-флаги (`--model-path`, `--capture-interval`) и env-переменные
 (`FROGGY_MODEL_PATH`, `FROGGY_CAPTURE_INTERVAL`) переопределяют значения
 из файла.
+
+Битый JSON или значение вне диапазона (например `"contextWindowSize": 0`,
+`"kvCacheBits": 6`) завершает демон с кодом 78 (`EX_CONFIG`) и одной
+строкой причины в stderr / unified log. Молчаливого отката на дефолты нет:
+в дефолтах freeze **включён**, а это ровно то, что вы могли выключить.
+Второй экземпляр демона завершается с кодом 75 (`EX_TEMPFAIL`), не трогая
+воркеры первого.
 
 ## IPC-команды
 

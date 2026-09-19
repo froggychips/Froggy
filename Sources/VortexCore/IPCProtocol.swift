@@ -98,6 +98,15 @@ public struct IPCResponse: Codable, Sendable {
     public var listening: Bool?
     /// Для streaming транскрипта: спикер ("mic" | "discord").
     public var speaker: String?
+    /// Для streaming транскрипта (cmd `listenStream`): `true` — сегмент
+    /// распознан окончательно, `false`/nil — промежуточный (partial) результат.
+    /// НЕ путать с `final`: `final` — конец всего IPC-стрима, по нему
+    /// IPCServer, IPCClient и внешний froggy-mcp закрывают соединение (это
+    /// поведение сохраняется). До появления этого поля daemon ставил
+    /// `final = isFinal` на каждый сегмент — и `froggy listen-stream`
+    /// обрывался на первой законченной фразе. Optional: старые клиенты
+    /// игнорируют, старые daemon'ы не шлют (nil).
+    public var segmentFinal: Bool?
     /// Имя дефолтного output-устройства (AirPods Pro, MacBook Speakers, …).
     /// Помогает клиенту определить нужен ли echo detection.
     public var audioOutputDevice: String?

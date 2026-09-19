@@ -40,6 +40,24 @@ final class FreezeStatsStoreTests: XCTestCase {
         await store.close()
     }
 
+    /// `prefix(limit)` с отрицательным аргументом — precondition failure;
+    /// store должен отдавать пустой результат, а не падать.
+    func testTopByMedianFreedWithNonPositiveLimitReturnsEmpty() async throws {
+        let url = makeURL()
+        defer { try? FileManager.default.removeItem(at: url) }
+        let store = FreezeStatsStore(fileURL: url)
+        try await store.openAndMigrate()
+        try await store.record(.init(
+            bundleId: "Any.app", pid: 1, rssBefore: 2_000_000, rssAfter: 1_000_000,
+            pageoutStrategy: "scratch", recoveryMs: 10
+        ))
+        let zero = try await store.topByMedianFreed(limit: 0, daysBack: 7)
+        XCTAssertTrue(zero.isEmpty)
+        let negative = try await store.topByMedianFreed(limit: -1, daysBack: 7)
+        XCTAssertTrue(negative.isEmpty)
+        await store.close()
+    }
+
     func testTopByMedianFreed() async throws {
         let url = makeURL()
         defer { try? FileManager.default.removeItem(at: url) }
