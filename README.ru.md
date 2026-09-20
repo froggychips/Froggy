@@ -68,7 +68,10 @@ Claude Code  ←— stdio / MCP (JSON-RPC) —→  froggy-sre  ←— socket (pr
   OCR не запускается.
 - **Secret redaction** — `Redactor` режет AWS-ключи, GitHub PAT, Anthropic /
   OpenAI / Slack-токены, JWT, bearer-заголовки, `password=`/`api_key=`/...
-  и валидированные по Luhn кредитки **до** записи на диск.
+  (включая значения в кавычках и значение на следующей OCR-строке),
+  многострочные PEM-блоки и валидированные по Luhn кредитки **до** записи
+  на диск. OCR-строки редактируются одним блоком, а не построчно. E-mail
+  и IBAN **не** редактируются — см. `SECURITY.md`.
 - **Sliding context window** — последние 30 redacted-снапшотов, по запросу
   отдаются как текстовый блок.
 - **MLX-инференс в child process** — `FroggyMLXWorker` живёт в отдельном

@@ -46,6 +46,8 @@ Include: macOS version, Froggy build, reproduction steps, and what you expected 
 - Context-dependent secrets (e.g. a UUID that happens to be a session token) are not detected
 - Partial redaction (e.g. first 4 chars leaked) is possible if a pattern has an off-by-one error
 
+Redactor limits (built-in rules, 2026-09): OCR lines are joined and redacted as one block, so multi-line PEM blocks and a `password:` label with its value on the next line are caught, and quoted values are taken whole. E-mail addresses, IBANs, phone numbers and passwords without a recognisable label are **not** redacted. Meeting transcripts written by `SessionStore` do not pass through `Redactor` at all. Corporate patterns can be added via `~/Library/Application Support/Froggy/redaction-rules.json`.
+
 If you find a pattern that reliably bypasses Redactor for a real-world secret format, please report it — that is a meaningful security issue.
 
 ### `VortexCore/IPC.swift` — inter-process socket

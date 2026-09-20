@@ -84,8 +84,11 @@ and `froggy-sre`, run `make ecosystem-smoke`.
   if the screen hasn't changed.
 - **Secret redaction** — `Redactor` strips AWS keys, GitHub PATs,
   Anthropic / OpenAI / Slack tokens, JWTs, bearer headers,
-  `password=`/`api_key=`/... values, and Luhn-validated credit cards
-  **before** anything is written to disk.
+  `password=`/`api_key=`/... values (quoted values and a label with its
+  value on the next OCR line included), multi-line PEM blocks, and
+  Luhn-validated credit cards **before** anything is written to disk.
+  OCR lines are redacted as one block, not line by line. E-mail addresses
+  and IBANs are **not** redacted — see `SECURITY.md`.
 - **Sliding context window** — the last 30 redacted snapshots, returned
   on demand as a single text block.
 - **MLX inference in a child process** — `FroggyMLXWorker` runs in its

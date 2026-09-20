@@ -175,8 +175,16 @@ public final class RealWorkspaceEventSource: WorkspaceEventSource, @unchecked Se
             // Activate — двойная семантика. Эмитим оба события:
             // `.appActivated` для reactive-finder'a (он ожидает увидеть pid
             // на любом активе), `.frontmostChanged` для frontmost-veto.
-            broadcast(.appActivated(pid: pid, bundleId: bundleId))
+            //
+            // Порядок важен: СНАЧАЛА `.frontmostChanged`, потом `.appActivated`.
+            // Coordinator на `.appActivated` перезапускает `freezeTier` под
+            // sustained pressure; если бы `.frontmostChanged` шёл вторым,
+            // обход видел бы старый frontmostPid и морозил бы только что
+            // активированное приложение, а следующее событие тут же его
+            // размораживало — SIGSTOP + pageout + SIGCONT на каждую активацию
+            // tier-1 app. Это был штатный порядок, а не corner-case.
             broadcast(.frontmostChanged(pid: pid, bundleId: bundleId))
+            broadcast(.appActivated(pid: pid, bundleId: bundleId))
         case .deactivated:
             broadcast(.appDeactivated(pid: pid, bundleId: bundleId))
         case .terminated:

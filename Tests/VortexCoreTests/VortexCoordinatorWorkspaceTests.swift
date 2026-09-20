@@ -1,3 +1,4 @@
+import AppKit
 import Foundation
 import XCTest
 @testable import VortexCore
@@ -322,5 +323,59 @@ final class VortexCoordinatorWorkspaceTests: XCTestCase {
         XCTAssertEqual(frozenAtCritical, [6001],
                        "tier-2 морозится на .critical")
         await coord.stopMonitoring()
+    }
+
+    /// Порядок событий реального источника при activate: `.frontmostChanged`
+    /// строго ПЕРЕД `.appActivated` — от этого зависит frontmost-veto в
+    /// `freezeTier` (см. `testRealActivationOrderDoesNotRefreezeActivatedApp`).
+    /// Нотификацию постим руками в `NSWorkspace.shared.notificationCenter`
+    /// с собственным процессом в userInfo; системные события чужих
+    /// приложений, которые могут прийти параллельно, отфильтровываем по pid
+    /// (review 2026-09-19).
+    func testRealSourceEmitsFrontmostChangedBeforeAppActivated() async throws {
+        let source = RealWorkspaceEventSource()
+        // Подписка синхронная (AsyncStream build-closure выполняется в init),
+        // yield'ы буферизуются — sleep перед post не нужен.
+        let stream = source.events()
+        let myPid = ProcessInfo.processInfo.processIdentifier
+        let collector = Task { () -> [WorkspaceEvent] in
+            var got: [WorkspaceEvent] = []
+            for await event in stream {
+                // Два case, а не один через запятую: у `.frontmostChanged`
+                // pid опциональный, у `.appActivated` — нет, типы связанных
+                // переменных в одном case должны совпадать.
+                switch event {
+                case .frontmostChanged(let pid, _) where pid == myPid:
+                    got.append(event)
+                case .appActivated(let pid, _) where pid == myPid:
+                    got.append(event)
+                default:
+                    continue
+                }
+                if got.count == 2 { break }
+            }
+            return got
+        }
+        // Страховка от зависания: если своих событий не пришло, отменяем сборщик.
+        let watchdog = Task {
+            // Отмена watchdog'а бросает из `Task.sleep`: выходим молча, иначе
+            // снятие страховки само сработало бы как её срабатывание.
+            do { try await Task.sleep(for: .seconds(2)) } catch { return }
+            collector.cancel()
+        }
+
+        let app = NSRunningApplication.current
+        NSWorkspace.shared.notificationCenter.post(
+            name: NSWorkspace.didActivateApplicationNotification,
+            object: NSWorkspace.shared,
+            userInfo: [NSWorkspace.applicationUserInfoKey: app]
+        )
+
+        let events = await collector.value
+        watchdog.cancel()
+        XCTAssertEqual(events, [
+            .frontmostChanged(pid: myPid, bundleId: app.bundleIdentifier),
+            .appActivated(pid: myPid, bundleId: app.bundleIdentifier),
+        ], "ожидали frontmostChanged, затем appActivated; получили \(events)")
     }
 }

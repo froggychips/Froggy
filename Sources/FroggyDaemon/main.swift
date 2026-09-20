@@ -148,6 +148,8 @@ struct FroggyDaemon {
             audioOnDeviceRecognition: config.audioOnDeviceRecognition,
             echoSuppressionEnabled: config.echoSuppressionEnabled,
             echoSuppressionTailMs: config.echoSuppressionTailMs,
+            vadEnabled: config.vadEnabled,
+            vadRmsThreshold: config.vadRmsThreshold,
             freezingEnabled: config.freezingEnabled,
             auditLog: auditLog,
             // Issue #59: при pressure level change coordinator дёргает
