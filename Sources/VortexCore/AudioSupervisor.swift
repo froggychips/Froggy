@@ -179,7 +179,10 @@ public actor AudioSupervisor {
         // Номер выделяется на КАЖДУЮ попытку, в том числе отменённую: иначе
         // подписчик, пришедший после отмены, получил бы уже похороненный
         // номер и был бы закрыт хвостом той попытки.
-        let restarting = capturing
+        // Незакрытый стоп (его транскрипт и `goodbye` ещё в трубе) — такой
+        // же рестарт, как и старт поверх активной записи: `capturing` в этот
+        // момент уже false, но хвост прошлой записи ещё придёт.
+        let restarting = capturing || sessionAwaitingGoodbye != nil || !pendingStops.isEmpty
         if restarting {
             // Worker перезапускает захват сам, но подписчики прошлой сессии
             // иначе остались бы открытыми и без событий до следующего стопа.
@@ -272,7 +275,7 @@ public actor AudioSupervisor {
     public func shutdown() async {
         guard let workerPid = host.currentPid() else { return }
         if let data = try? JSONEncoder().encode(
-            AudioWorkerCommand(cmd: AudioWorkerCommand.shutdown, requestId: UUID().uuidString)
+            AudioWorkerCommand(cmd: AudioWorkerCommand.shutdown, requestId: stopRequestId(for: captureSession))
         ) {
             let sent = await host.writeWithTimeout(data, timeout: .seconds(1))
             if !sent {
@@ -393,8 +396,8 @@ public actor AudioSupervisor {
                 // продолжает писать.
                 if stopped >= captureSession { capturing = false }
                 finishTranscriptSubscribers(upTo: stopped)
-            } else if event.requestId == nil || pendingStops.isEmpty {
-                // shutdown или worker без requestId — закрываем текущую.
+            } else if event.requestId == nil {
+                // Worker без requestId (legacy) — закрываем текущую.
                 capturing = false
                 finishTranscriptSubscribers(upTo: emittingSession ?? captureSession)
             } else {
