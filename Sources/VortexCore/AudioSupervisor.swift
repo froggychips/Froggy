@@ -185,6 +185,7 @@ public actor AudioSupervisor {
             // гасим его сразу, сессию не открываем, `capturing` не выставляем.
             stopRequestedDuringStart = false
             try? sendCommand(.init(cmd: AudioWorkerCommand.stopCapture, requestId: UUID().uuidString))
+            finishTranscriptSubscribers()
             Self.log.notice("audio capture cancelled: stop requested during start")
             return
         }
@@ -214,6 +215,7 @@ public actor AudioSupervisor {
         guard capturing else { return }
         try? sendCommand(.init(cmd: AudioWorkerCommand.stopCapture, requestId: UUID().uuidString))
         capturing = false
+        finishTranscriptSubscribers()
         Self.log.notice("audio capture stopped")
     }
 
@@ -326,6 +328,13 @@ public actor AudioSupervisor {
                 Self.log.error("audio worker error: \(event.message ?? "unknown", privacy: .public)")
             }
 
+        case AudioWorkerEvent.goodbye:
+            // Worker подтвердил конец записи (ответ на stopCapture/shutdown).
+            // Транскрипта больше не будет — закрываем подписки, иначе клиент
+            // ждёт вечно даже после остановки с другого соединения.
+            capturing = false
+            finishTranscriptSubscribers()
+
         case AudioWorkerEvent.pong:
             if let id = event.requestId, let cont = pendingRequests.removeValue(forKey: id) {
                 cont.resume()
@@ -334,6 +343,16 @@ public actor AudioSupervisor {
         default:
             break
         }
+    }
+
+    /// Конец потока транскрипта = `continuation.finish()`. Финальность
+    /// отдельного сегмента этим не является: остановка записи приходит не из
+    /// потока событий, а от `stopCapture`/`goodbye`, и без явного закрытия
+    /// подписчик (`froggy listen-stream`, MCP-консьюмер) висит после конца
+    /// записи — в том числе когда остановку инициировал другой клиент.
+    private func finishTranscriptSubscribers() {
+        for cont in subscribers.values { cont.finish() }
+        subscribers.removeAll()
     }
 
     // MARK: - Exit handling
@@ -358,8 +377,7 @@ public actor AudioSupervisor {
 
     private func cleanup() {
         pendingRequests.removeAll()
-        for cont in subscribers.values { cont.finish() }
-        subscribers.removeAll()
+        finishTranscriptSubscribers()
         capturing = false
         stopRequestedDuringStart = false
         // Issue #57: следующий spawn — другой бинарь, мог отстать.

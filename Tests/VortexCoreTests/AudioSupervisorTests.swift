@@ -157,6 +157,34 @@ final class AudioSupervisorTests: XCTestCase {
         await supervisor.shutdown()
     }
 
+    /// Конец записи закрывает поток транскрипта. Финальность сегмента концом
+    /// стрима не является, и пока `stopCapture` не завершал подписки,
+    /// `froggy listen-stream` висел после остановки — в том числе когда её
+    /// инициировал другой клиент.
+    func testStopCaptureFinishesTranscriptStream() async throws {
+        let supervisor = makeSupervisor()
+        try await supervisor.startCapture(discordPid: nil)
+        let (stream, _) = await supervisor.subscribeToTranscripts()
+
+        let finished: Bool = try await withThrowingTaskGroup(of: Bool.self) { group in
+            group.addTask {
+                for await _ in stream {}
+                return true
+            }
+            group.addTask {
+                try await Task.sleep(for: .seconds(3))
+                return false
+            }
+            await supervisor.stopCapture()
+            let first = try await group.next() ?? false
+            group.cancelAll()
+            return first
+        }
+
+        XCTAssertTrue(finished, "stopCapture должен завершать поток транскрипта")
+        await supervisor.shutdown()
+    }
+
     /// `stopCapture` во время pending `startCapture` раньше был no-op
     /// (`capturing == false`), и микрофон оставался включённым. Теперь
     /// остановка откладывается и выполняется по возвращении `ready`.
