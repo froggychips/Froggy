@@ -179,7 +179,8 @@ public actor AudioSupervisor {
         // Номер выделяется на КАЖДУЮ попытку, в том числе отменённую: иначе
         // подписчик, пришедший после отмены, получил бы уже похороненный
         // номер и был бы закрыт хвостом той попытки.
-        if capturing {
+        let restarting = capturing
+        if restarting {
             // Worker перезапускает захват сам, но подписчики прошлой сессии
             // иначе остались бы открытыми и без событий до следующего стопа.
             Self.log.notice("start during active capture — retiring session \(self.captureSession, privacy: .public)")
@@ -187,7 +188,10 @@ public actor AudioSupervisor {
             finishTranscriptSubscribers(upTo: captureSession)
         }
         captureSession &+= 1
-        emittingSession = captureSession
+        // При рестарте в трубе ещё может стоять хвост прошлой записи, а в
+        // событиях транскрипта нет номера сессии — до `ready` новой записи
+        // не помечаем ничего, иначе старые строки уедут новым подписчикам.
+        emittingSession = restarting ? nil : captureSession
         startInFlight = true
         stopRequestedDuringStart = false
         defer { startInFlight = false }
@@ -233,6 +237,7 @@ public actor AudioSupervisor {
         }
 
         capturing = true
+        emittingSession = captureSession
         let requestedURL = SessionStore.makeURL(in: sessionDirectory)
         do {
             let store = try SessionStore(at: requestedURL)
@@ -381,9 +386,20 @@ public actor AudioSupervisor {
             // стоп-команды — опоздавший `goodbye` не должен обрывать запись,
             // начатую после него. Без совпадения (shutdown, старый worker)
             // закрываем текущую.
-            let stopped = event.requestId.flatMap { pendingStops.removeValue(forKey: $0) }
-            capturing = false
-            finishTranscriptSubscribers(upTo: stopped ?? emittingSession ?? captureSession)
+            if let rid = event.requestId, let stopped = pendingStops.removeValue(forKey: rid) {
+                // Запись могли уже перезапустить: гасим флаг только если
+                // остановлена именно текущая сессия, иначе `stopCapture`
+                // следующей вернулся бы на `guard capturing`, пока worker
+                // продолжает писать.
+                if stopped >= captureSession { capturing = false }
+                finishTranscriptSubscribers(upTo: stopped)
+            } else if event.requestId == nil || pendingStops.isEmpty {
+                // shutdown или worker без requestId — закрываем текущую.
+                capturing = false
+                finishTranscriptSubscribers(upTo: emittingSession ?? captureSession)
+            } else {
+                Self.log.notice("goodbye with unknown requestId — ignored")
+            }
 
         case AudioWorkerEvent.pong:
             if let id = event.requestId, let cont = pendingRequests.removeValue(forKey: id) {
@@ -405,7 +421,6 @@ public actor AudioSupervisor {
         transcriptFinishTask = nil
         if sessionAwaitingGoodbye.map({ $0 <= session }) ?? false { sessionAwaitingGoodbye = nil }
         if emittingSession.map({ $0 <= session }) ?? false { emittingSession = nil }
-        pendingStops = pendingStops.filter { $0.value > session }
         for (id, sub) in subscribers where sub.session <= session {
             sub.continuation.finish()
             subscribers.removeValue(forKey: id)
@@ -456,6 +471,7 @@ public actor AudioSupervisor {
     }
 
     private func finishTranscriptsAfterGoodbyeTimeout(session: UInt64) {
+        pendingStops = pendingStops.filter { $0.value != session }
         guard subscribers.values.contains(where: { $0.session <= session }) else { return }
         Self.log.warning("no goodbye within 2s after stop — closing transcript subscriptions")
         finishTranscriptSubscribers(upTo: session)
@@ -483,6 +499,7 @@ public actor AudioSupervisor {
 
     private func cleanup() {
         pendingRequests.removeAll()
+        pendingStops.removeAll()
         finishAllTranscriptSubscribers()
         capturing = false
         stopRequestedDuringStart = false

@@ -248,6 +248,11 @@ public final class WorkerProcessHost: @unchecked Sendable {
         toRemove = process?.processIdentifier
         try? stdinHandle?.close()
         stdinHandle = nil
+        // Поколение растёт ДО того, как буфер станет пустым: иначе
+        // readabilityHandler умирающего процесса успевает дописать в него
+        // хвост, и первая JSON-строка следующего worker'а склеивается с ним
+        // в битую (потерянный `ready` — вечное ожидание в startCapture).
+        spawnGeneration &+= 1
         stdoutBuffer.removeAll()
         process = nil
         lock.unlock()
