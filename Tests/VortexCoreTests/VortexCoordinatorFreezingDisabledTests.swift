@@ -228,7 +228,9 @@ final class VortexCoordinatorFreezingDisabledTests: XCTestCase {
 
         src.emit(.warning)
         let watchdog = Task {
-            try? await Task.sleep(for: .seconds(3))
+            // Отмена watchdog'а бросает из `Task.sleep`: выходим молча, иначе
+            // снятие страховки само сработало бы как её срабатывание.
+            do { try await Task.sleep(for: .seconds(3)) } catch { return }
             await gate.abort()
         }
         let arrived = await gate.arrived()
@@ -272,7 +274,9 @@ final class VortexCoordinatorFreezingDisabledTests: XCTestCase {
 
         src.emit(.warning)
         let watchdog = Task {
-            try? await Task.sleep(for: .seconds(3))
+            // Отмена watchdog'а бросает из `Task.sleep`: выходим молча, иначе
+            // снятие страховки само сработало бы как её срабатывание.
+            do { try await Task.sleep(for: .seconds(3)) } catch { return }
             await gate.abort()
         }
         let arrived = await gate.arrived()

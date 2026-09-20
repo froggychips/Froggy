@@ -358,7 +358,9 @@ final class VortexCoordinatorWorkspaceTests: XCTestCase {
         }
         // Страховка от зависания: если своих событий не пришло, отменяем сборщик.
         let watchdog = Task {
-            try? await Task.sleep(for: .seconds(2))
+            // Отмена watchdog'а бросает из `Task.sleep`: выходим молча, иначе
+            // снятие страховки само сработало бы как её срабатывание.
+            do { try await Task.sleep(for: .seconds(2)) } catch { return }
             collector.cancel()
         }
 
