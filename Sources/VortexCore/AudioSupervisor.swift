@@ -151,6 +151,7 @@ public actor AudioSupervisor {
         vadRmsThreshold: Double = 0.008
     ) async throws {
         guard !startInFlight else { throw AudioSupervisorError.startInProgress }
+        resolvePendingGoodbyeFallback()
         try ensureWorkerSpawned()
 
         startInFlight = true
@@ -379,6 +380,16 @@ public actor AudioSupervisor {
             guard !Task.isCancelled else { return }
             await self?.finishTranscriptsAfterGoodbyeTimeout()
         }
+    }
+
+    /// Незакрытая прошлая сессия закрывается на входе в новую запись:
+    /// подписчики лежат в одном словаре, и таймер остановленной сессии иначе
+    /// оборвал бы стрим уже начавшейся (worker без `goodbye` + рестарт
+    /// быстрее двух секунд).
+    private func resolvePendingGoodbyeFallback() {
+        guard transcriptFinishTask != nil else { return }
+        Self.log.notice("new capture before goodbye — closing previous transcript subscriptions")
+        finishTranscriptSubscribers()
     }
 
     private func finishTranscriptsAfterGoodbyeTimeout() {
