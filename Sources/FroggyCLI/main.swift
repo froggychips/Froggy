@@ -247,8 +247,14 @@ struct FroggyCLI {
             guard chunk.ok == true else {
                 stderr(chunk.error ?? "stream error"); exit(1)
             }
+            // Trailer конца стрима (`final == true` без текста) — не печатаем
+            // пустую строку. Маркер «…» — по `segmentFinal` (partial-сегмент);
+            // fallback на `final` для старых daemon'ов, которые ставили
+            // `final = isFinal` на каждый сегмент.
+            if chunk.final == true, chunk.text == nil { break }
             let speaker = chunk.speaker ?? "?"
-            let marker = chunk.final == true ? "" : "…"
+            let isSegmentFinal = chunk.segmentFinal ?? (chunk.final ?? false)
+            let marker = isSegmentFinal ? "" : "…"
             print("[\(speaker)]\(marker) \(chunk.text ?? "")")
             fflush(stdout)
         }

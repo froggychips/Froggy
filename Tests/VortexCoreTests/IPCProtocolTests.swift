@@ -57,6 +57,28 @@ final class IPCProtocolTests: XCTestCase {
         XCTAssertNil(decoded.experimental)
     }
 
+    /// `segmentFinal` (финальность сегмента транскрипта) переживает roundtrip
+    /// и не смешивается с `final` (конец IPC-стрима).
+    func testSegmentFinalRoundTripIndependentOfFinal() throws {
+        var r = IPCResponse()
+        r.ok = true
+        r.text = "hello"
+        r.speaker = "mic"
+        r.segmentFinal = true
+        let data = try JSONEncoder().encode(r)
+        let decoded = try JSONDecoder().decode(IPCResponse.self, from: data)
+        XCTAssertEqual(decoded.segmentFinal, true)
+        XCTAssertNil(decoded.final, "segmentFinal must not imply end-of-stream")
+    }
+
+    /// Backward-compat: chunk от старого daemon'а без поля → nil.
+    func testSegmentFinalAbsentDecodesNil() throws {
+        let json = #"{"ok":true,"text":"x","speaker":"discord","final":true}"#
+        let decoded = try JSONDecoder().decode(IPCResponse.self, from: Data(json.utf8))
+        XCTAssertNil(decoded.segmentFinal)
+        XCTAssertEqual(decoded.final, true)
+    }
+
     func testAccessorDescriptorRoundTripWithExperimentalFlag() throws {
         var r = IPCResponse()
         r.ok = true

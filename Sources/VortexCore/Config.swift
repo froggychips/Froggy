@@ -22,8 +22,11 @@ public struct FroggyConfig: Codable, Sendable, Equatable {
     /// состоянии, прежде чем мы начнём оттепель.
     public var pressureCooldownSeconds: Int
 
-    /// Стратегия принудительного pageout после SIGSTOP. По умолчанию `jetsam`
-    /// (не требует `task_for_pid-allow` entitlement'а). См. ADR 0007.
+    /// Стратегия принудительного pageout после SIGSTOP. По умолчанию `scratch` —
+    /// единственная стратегия, работающая без привилегий: `jetsam` требует
+    /// root или entitlement `com.apple.private.memorystatus` (иначе
+    /// `memorystatus_control` → EPERM), `machVM` — development-ядро/SIP off.
+    /// См. ADR 0007 и ADR 0018.
     public var pageoutStrategy: PageoutStrategy
     /// Размер scratch-буфера для `.scratch` стратегии и для fallback-цепочки.
     public var pageoutScratchMB: Int
@@ -118,7 +121,7 @@ public struct FroggyConfig: Codable, Sendable, Equatable {
         freezeTier1BundleIds: [String] = FroggyConfig.defaultFreezeTier1BundleIds,
         freezeTier2BundleIds: [String] = FroggyConfig.defaultFreezeTier2BundleIds,
         pressureCooldownSeconds: Int = 60,
-        pageoutStrategy: PageoutStrategy = .jetsam,
+        pageoutStrategy: PageoutStrategy = .scratch,
         pageoutScratchMB: Int = 256,
         mlxWorkerPath: String? = nil,
         callModelPath: String? = nil,
@@ -255,8 +258,11 @@ public struct FroggyConfig: Codable, Sendable, Equatable {
     /// Throws only on malformed JSON / IO errors other than not-found.
     public static func load(from url: URL = defaultURL) throws -> FroggyConfig {
         let fm = FileManager.default
+        // Создаём только каталог самого файла. Раньше здесь безусловно
+        // создавался глобальный `supportDirectory` — и тесты с временным
+        // `url` заводили настоящий ~/Library/Application Support/Froggy.
         try fm.createDirectory(
-            at: supportDirectory,
+            at: url.deletingLastPathComponent(),
             withIntermediateDirectories: true,
             attributes: [.posixPermissions: 0o700]
         )
@@ -278,4 +284,75 @@ public struct FroggyConfig: Codable, Sendable, Equatable {
             [.posixPermissions: 0o600], ofItemAtPath: url.path
         )
     }
+
+    // MARK: - Validation
+
+    /// Допустимые значения `kvCacheBits` (ADR 0009): 16 — без квантизации, 8, 4.
+    /// Worker принимает любое число, но MLX на других значениях падает уже
+    /// внутри генерации — ловим на старте демона.
+    public static let allowedKVCacheBits: Set<Int> = [16, 8, 4]
+
+    /// Проверка диапазонов ПОСЛЕ применения CLI/env-overrides. Codable сам
+    /// ничего не проверяет: `{"contextWindowSize": 0}` успешно декодировался
+    /// и валил демон на `precondition(capacity > 0)` в ContextStore при
+    /// каждом старте — crash-loop под launchd без единого понятного слова
+    /// в логе. Здесь один явный проход по полям, которые дальше становятся
+    /// precondition'ом, делителем, длиной буфера или множителем интервала.
+    public func validate() throws {
+        func require(_ ok: Bool, _ field: String, _ reason: String) throws {
+            if !ok { throw ConfigValidationError(field: field, reason: reason) }
+        }
+        try require(contextWindowSize >= 1, "contextWindowSize",
+                    "must be >= 1 (got \(contextWindowSize))")
+        try require(contextMaxChars >= 1, "contextMaxChars",
+                    "must be >= 1 (got \(contextMaxChars))")
+        try require(captureIntervalSeconds >= 1, "captureIntervalSeconds",
+                    "must be >= 1 second (got \(captureIntervalSeconds))")
+        try require(framePacerWarningMultiplier.isFinite && framePacerWarningMultiplier >= 1,
+                    "framePacerWarningMultiplier",
+                    "must be finite and >= 1 (got \(framePacerWarningMultiplier))")
+        try require(framePacerCriticalMultiplier.isFinite && framePacerCriticalMultiplier >= 1,
+                    "framePacerCriticalMultiplier",
+                    "must be finite and >= 1 (got \(framePacerCriticalMultiplier))")
+        try require(pressureCooldownSeconds >= 0, "pressureCooldownSeconds",
+                    "must be >= 0 (got \(pressureCooldownSeconds))")
+        // Нижняя граница 16 МБ применяется нормализацией в
+        // `ScratchPageoutImpl.init` (`max(16, …)`); здесь отсекаем только
+        // бессмысленные значения, чтобы не отвергать ранее валидные конфиги.
+        try require(pageoutScratchMB > 0, "pageoutScratchMB",
+                    "must be > 0 (got \(pageoutScratchMB))")
+        try require(frameSimilarityThreshold.isFinite && (0.0...1.0).contains(frameSimilarityThreshold),
+                    "frameSimilarityThreshold",
+                    "must be within 0...1 (got \(frameSimilarityThreshold))")
+        try require(contextDedupThreshold.isFinite && (0.0...1.0).contains(contextDedupThreshold),
+                    "contextDedupThreshold",
+                    "must be within 0...1 (got \(contextDedupThreshold))")
+        try require(echoSuppressionTailMs >= 0, "echoSuppressionTailMs",
+                    "must be >= 0 (got \(echoSuppressionTailMs))")
+        try require(vadRmsThreshold.isFinite && vadRmsThreshold >= 0, "vadRmsThreshold",
+                    "must be finite and >= 0 (got \(vadRmsThreshold))")
+        try require(Self.allowedKVCacheBits.contains(kvCacheBits), "kvCacheBits",
+                    "must be one of 16/8/4 (got \(kvCacheBits))")
+        try require(!ipcSocketPath.isEmpty, "ipcSocketPath", "must not be empty")
+        // sockaddr_un.sun_path на macOS — 104 байта включая NUL.
+        try require(ipcSocketPath.utf8.count <= 103, "ipcSocketPath",
+                    "too long for sockaddr_un (max 103 bytes, got \(ipcSocketPath.utf8.count))")
+        if let limit = gpuMemoryLimitBytes {
+            try require(limit > 0, "gpuMemoryLimitBytes", "must be > 0 when set (got \(limit))")
+        }
+    }
+}
+
+/// Ошибка валидации конфига: поле и причина. `CustomStringConvertible`,
+/// чтобы daemon печатал её в stderr и unified log одной строкой.
+public struct ConfigValidationError: Error, CustomStringConvertible, Equatable, Sendable {
+    public let field: String
+    public let reason: String
+
+    public init(field: String, reason: String) {
+        self.field = field
+        self.reason = reason
+    }
+
+    public var description: String { "config.\(field): \(reason)" }
 }
