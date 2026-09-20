@@ -457,6 +457,16 @@ public actor VortexCoordinator: WorkspaceTerminationWatcher.Sink {
                 "pressure_level=\(level.rawValue) tier1=\(self.tier1Frozen.count) tier2=\(self.tier2Frozen.count)"
             )
         }
+        // Одно поколение на весь обработчик, снятое ДО первого await:
+        // thawAll во время обхода tier-1 должен прервать и tier-2, а не
+        // только текущий tier (иначе tier-2 взял бы уже новое поколение и
+        // доморозил после Off/willSleep). `pacerAdjuster` ниже — тоже await:
+        // пока он висит, thawAll()/stopMonitoring() успевают инкрементить
+        // поколение, и обработчик, читающий его после, сравнивал бы новое
+        // значение с самим собой — все stale-проверки проходили бы, а обход
+        // морозил процессы уже после Off/sleep. Отмена задачи async-обработчик
+        // сама по себе не останавливает, поэтому защита — именно поколение.
+        let generation = policyGeneration
         // Issue #59: vision pacer узнаёт о новом уровне до freeze-логики.
         // На .warning/.critical OCR растягивается ДО того как мы начнём
         // SIGSTOP'ить процессы — даёт системе шанс «выдохнуть» раньше.
@@ -465,10 +475,6 @@ public actor VortexCoordinator: WorkspaceTerminationWatcher.Sink {
         }
 
         let pressureReason = "pressure_\(level.rawValue)"
-        // Одно поколение на весь обработчик: thawAll во время обхода tier-1
-        // должен прервать и tier-2, а не только текущий tier (иначе tier-2
-        // взял бы уже новое поколение и доморозил после Off/willSleep).
-        let generation = policyGeneration
         switch level {
         case .warning:
             thawTask?.cancel(); thawTask = nil

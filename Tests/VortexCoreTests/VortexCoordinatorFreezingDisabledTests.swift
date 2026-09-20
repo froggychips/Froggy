@@ -202,6 +202,52 @@ final class VortexCoordinatorFreezingDisabledTests: XCTestCase {
     /// (emergencyThaw), и обход, вернувшись из `finder.pids`, обязан
     /// прерваться — до фикса второй pid оказывался в SIGSTOP уже ПОСЛЕ Off и
     /// сидел там до следующего thaw (review 2026-09-19).
+    /// Поколение политики снимается ДО `pacerAdjuster`. Пока pacer висит,
+    /// `thawAll()` меняет поколение; обработчик, прочитавший его после
+    /// await, сравнивал бы новое значение с самим собой — все stale-проверки
+    /// проходили бы, и обход морозил процессы уже после оттепели.
+    func testThawDuringPacerAwaitAbortsTraversal() async throws {
+        let src = FakeMemoryPressureSource()
+        let monitor = MemoryPressureMonitor(source: src, cooldownSeconds: 0.5)
+        let stub = StubVortexForToggle()
+        let gate = TestGate()
+        let finder = ToggleFinder(mapping: ["tier1.app": [1001, 1002]])
+        let mlx = MLXSupervisor()
+        let coord = VortexCoordinator(
+            mlx: mlx,
+            vortex: stub,
+            monitor: monitor,
+            tier1BundleIds: ["tier1.app"],
+            tier2BundleIds: [],
+            finder: finder,
+            gradualThawDelaySeconds: 0.1,
+            freezingEnabled: true,
+            pacerAdjuster: { _ in await gate.arrive() }
+        )
+        await coord.startMonitoring()
+
+        src.emit(.warning)
+        let watchdog = Task {
+            try? await Task.sleep(for: .seconds(3))
+            await gate.abort()
+        }
+        let arrived = await gate.arrived()
+        watchdog.cancel()
+        XCTAssertTrue(arrived, "обработчик не дошёл до pacer'а за 3 с")
+
+        // Оттепель, пока обработчик висит в pacer'е: поколение меняется.
+        await coord.thawAll(reason: "test")
+        await gate.open()
+        // Отрицательное утверждение — даём обходу время «отстояться».
+        try await Task.sleep(for: .milliseconds(200))
+
+        let calls = await stub.freezeCalls()
+        XCTAssertTrue(calls.isEmpty, "после thawAll обход не должен морозить: \(calls)")
+        let frozen = await stub.currentlyFrozen()
+        XCTAssertTrue(frozen.isEmpty, "ни один pid не должен остаться в SIGSTOP: \(frozen)")
+        await coord.stopMonitoring()
+    }
+
     func testToggleOffDuringTraversalAbortsRemainingFreezes() async throws {
         let src = FakeMemoryPressureSource()
         let monitor = MemoryPressureMonitor(source: src, cooldownSeconds: 0.5)
