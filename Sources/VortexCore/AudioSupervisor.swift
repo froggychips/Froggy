@@ -63,6 +63,9 @@ public actor AudioSupervisor {
     private let pipeEvents: AsyncStream<WorkerPipeEvent>
     private let pipeContinuation: AsyncStream<WorkerPipeEvent>.Continuation
     private var pipePump: Task<Void, Never>?
+    /// Страховка на случай, если worker не пришлёт `goodbye` на стоп
+    /// (старая версия, крэш между командой и ответом). См. `awaitGoodbye`.
+    private var transcriptFinishTask: Task<Void, Never>?
     private var pendingRequests: [String: CheckedContinuation<Void, any Error>] = [:]
     private var subscribers: [UUID: AsyncStream<TranscriptEvent>.Continuation] = [:]
     private var capturing = false
@@ -185,7 +188,7 @@ public actor AudioSupervisor {
             // гасим его сразу, сессию не открываем, `capturing` не выставляем.
             stopRequestedDuringStart = false
             try? sendCommand(.init(cmd: AudioWorkerCommand.stopCapture, requestId: UUID().uuidString))
-            finishTranscriptSubscribers()
+            awaitGoodbyeThenFinishTranscripts()
             Self.log.notice("audio capture cancelled: stop requested during start")
             return
         }
@@ -215,7 +218,7 @@ public actor AudioSupervisor {
         guard capturing else { return }
         try? sendCommand(.init(cmd: AudioWorkerCommand.stopCapture, requestId: UUID().uuidString))
         capturing = false
-        finishTranscriptSubscribers()
+        awaitGoodbyeThenFinishTranscripts()
         Self.log.notice("audio capture stopped")
     }
 
@@ -329,9 +332,10 @@ public actor AudioSupervisor {
             }
 
         case AudioWorkerEvent.goodbye:
-            // Worker подтвердил конец записи (ответ на stopCapture/shutdown).
-            // Транскрипта больше не будет — закрываем подписки, иначе клиент
-            // ждёт вечно даже после остановки с другого соединения.
+            // Worker подтвердил конец записи (ответ на stopCapture/shutdown)
+            // и, по порядку протокола, уже отдал весь транскрипт до него.
+            // Здесь и закрываем подписки: иначе клиент ждёт вечно даже после
+            // остановки с другого соединения.
             capturing = false
             finishTranscriptSubscribers()
 
@@ -351,8 +355,36 @@ public actor AudioSupervisor {
     /// подписчик (`froggy listen-stream`, MCP-консьюмер) висит после конца
     /// записи — в том числе когда остановку инициировал другой клиент.
     private func finishTranscriptSubscribers() {
+        transcriptFinishTask?.cancel()
+        transcriptFinishTask = nil
         for cont in subscribers.values { cont.finish() }
         subscribers.removeAll()
+    }
+
+    /// Закрываем подписки не на самой команде стопа, а на `goodbye`: в
+    /// `pipeEvents` может стоять уже записанная worker'ом, но ещё не
+    /// доставленная строка транскрипта, а протокол упорядочен — `goodbye`
+    /// приходит после всего предыдущего вывода. Таймер — страховка: без
+    /// `goodbye` (старый worker, крэш между командой и ответом) подписчик
+    /// иначе висел бы снова.
+    private func awaitGoodbyeThenFinishTranscripts() {
+        guard !subscribers.isEmpty else { return }
+        transcriptFinishTask?.cancel()
+        transcriptFinishTask = Task { [weak self] in
+            do {
+                try await Task.sleep(for: .seconds(2))
+            } catch {
+                return  // отменены `goodbye`-веткой: подписки уже закрыты
+            }
+            guard !Task.isCancelled else { return }
+            await self?.finishTranscriptsAfterGoodbyeTimeout()
+        }
+    }
+
+    private func finishTranscriptsAfterGoodbyeTimeout() {
+        guard !subscribers.isEmpty else { return }
+        Self.log.warning("no goodbye within 2s after stop — closing transcript subscriptions")
+        finishTranscriptSubscribers()
     }
 
     // MARK: - Exit handling
