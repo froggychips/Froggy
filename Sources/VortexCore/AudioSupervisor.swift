@@ -80,6 +80,10 @@ public actor AudioSupervisor {
     private var captureSession: UInt64 = 0
     /// Сессия, по которой стоп уже отправлен и ждём `goodbye`.
     private var sessionAwaitingGoodbye: UInt64?
+    /// Сессия, чей вывод сейчас идёт от worker'а: транскрипт адресуется
+    /// только её подписчикам, иначе хвост прошлой записи попал бы в стрим
+    /// (и в `ContextStore`) следующей.
+    private var emittingSession: UInt64?
     private var capturing = false
     /// `startCapture` ждёт `ready` от worker'а через continuation; в это окно
     /// `capturing == false`, и `stopCapture` раньше был no-op — микрофон
@@ -146,7 +150,7 @@ public actor AudioSupervisor {
         }
         subscribers[id] = TranscriptSubscription(
             continuation: continuation,
-            session: capturing ? captureSession : captureSession + 1
+            session: (capturing || startInFlight) ? captureSession : captureSession &+ 1
         )
         return (stream, id)
     }
@@ -169,6 +173,11 @@ public actor AudioSupervisor {
         resolvePendingGoodbyeFallback()
         try ensureWorkerSpawned()
 
+        // Номер выделяется на КАЖДУЮ попытку, в том числе отменённую: иначе
+        // подписчик, пришедший после отмены, получил бы уже похороненный
+        // номер и был бы закрыт хвостом той попытки.
+        captureSession &+= 1
+        emittingSession = captureSession
         startInFlight = true
         stopRequestedDuringStart = false
         defer { startInFlight = false }
@@ -204,13 +213,12 @@ public actor AudioSupervisor {
             // гасим его сразу, сессию не открываем, `capturing` не выставляем.
             stopRequestedDuringStart = false
             try? sendCommand(.init(cmd: AudioWorkerCommand.stopCapture, requestId: UUID().uuidString))
-            awaitGoodbyeThenFinishTranscripts(upTo: captureSession &+ 1)
+            awaitGoodbyeThenFinishTranscripts(upTo: captureSession)
             Self.log.notice("audio capture cancelled: stop requested during start")
             return
         }
 
         capturing = true
-        captureSession &+= 1
         let requestedURL = SessionStore.makeURL(in: sessionDirectory)
         do {
             let store = try SessionStore(at: requestedURL)
@@ -339,7 +347,10 @@ public actor AudioSupervisor {
             if te.isFinal, let store = sessionStore {
                 Task { await store.append(speaker: te.speaker, text: te.text) }
             }
-            for sub in subscribers.values { sub.continuation.yield(te) }
+            guard let emitting = emittingSession else { break }
+            for sub in subscribers.values where sub.session == emitting {
+                sub.continuation.yield(te)
+            }
 
         case AudioWorkerEvent.error:
             if let id = event.requestId, let cont = pendingRequests.removeValue(forKey: id) {
@@ -375,6 +386,7 @@ public actor AudioSupervisor {
         transcriptFinishTask?.cancel()
         transcriptFinishTask = nil
         if sessionAwaitingGoodbye.map({ $0 <= session }) ?? false { sessionAwaitingGoodbye = nil }
+        if emittingSession.map({ $0 <= session }) ?? false { emittingSession = nil }
         for (id, sub) in subscribers where sub.session <= session {
             sub.continuation.finish()
             subscribers.removeValue(forKey: id)
