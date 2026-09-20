@@ -9,6 +9,9 @@ public enum AudioSupervisorError: Error, Sendable, CustomStringConvertible {
     case workerSpawnFailed(String)
     case workerCrashed
     case captureFailed(String)
+    /// Второй `startCapture`, пока первый ждёт `ready`. Два pending старта
+    /// делили бы одни флаги отмены — отказываем сразу, без второго ожидания.
+    case startInProgress
 
     public var description: String {
         switch self {
@@ -16,6 +19,7 @@ public enum AudioSupervisorError: Error, Sendable, CustomStringConvertible {
         case .workerSpawnFailed(let r): return "Не удалось spawn-нуть audio worker: \(r)"
         case .workerCrashed:           return "Audio worker упал во время захвата"
         case .captureFailed(let r):    return "Capture failed: \(r)"
+        case .startInProgress:         return "startCapture уже выполняется"
         }
     }
 }
@@ -37,25 +41,58 @@ public actor AudioSupervisor {
 
     private let workerURL: URL
     private let pidStore: FrozenPidsStore?
+    /// Каталог markdown-сессий. Дефолт — `~/Documents/Froggy/Meetings`;
+    /// тесты передают временный каталог, чтобы не писать в реальные документы.
+    private let sessionDirectory: URL
     /// Pipe-lifecycle (issue #58). Lazy по той же причине что и в MLXSupervisor —
-    /// Swift 6 запрещает `[weak self]` capture в actor init.
+    /// stored properties из closure в actor init недоступны. Callback'и host'а
+    /// только кладут события в `pipeContinuation`; в actor они попадают через
+    /// один последовательный `pipePump` (см. `WorkerPipeEvent`).
     private lazy var host: WorkerProcessHost = WorkerProcessHost(
         workerURL: workerURL,
         args: [],
         log: Self.log,
         pidStore: pidStore,
-        onLine: { [weak self] line in
-            guard let self else { return }
-            Task { await self.handleLine(line) }
+        onLine: { [pipeContinuation] line, gen in
+            pipeContinuation.yield(.line(line, generation: gen))
         },
-        onExit: { [weak self] pid, status in
-            guard let self else { return }
-            Task { await self.handleWorkerExit(pid: pid, status: status) }
+        onExit: { [pipeContinuation] pid, status, gen in
+            pipeContinuation.yield(.exit(pid: pid, status: status, generation: gen))
         }
     )
+    private let pipeEvents: AsyncStream<WorkerPipeEvent>
+    private let pipeContinuation: AsyncStream<WorkerPipeEvent>.Continuation
+    private var pipePump: Task<Void, Never>?
+    /// Страховка на случай, если worker не пришлёт `goodbye` на стоп
+    /// (старая версия, крэш между командой и ответом). См. `awaitGoodbye`.
+    private var transcriptFinishTask: Task<Void, Never>?
     private var pendingRequests: [String: CheckedContinuation<Void, any Error>] = [:]
-    private var subscribers: [UUID: AsyncStream<TranscriptEvent>.Continuation] = [:]
+    /// Подписчик и сессия, чей транскрипт он ждёт: текущая, если запись идёт,
+    /// иначе следующая — подписаться до `startCapture` разрешено (так делает
+    /// заранее запущенный `froggy listen-stream`). Номер нужен, чтобы стоп
+    /// одной сессии не закрывал стрим, открытый для другой.
+    private struct TranscriptSubscription {
+        let continuation: AsyncStream<TranscriptEvent>.Continuation
+        let session: UInt64
+    }
+    private var subscribers: [UUID: TranscriptSubscription] = [:]
+    /// Номер текущей (или последней) записи; растёт на каждом старте.
+    private var captureSession: UInt64 = 0
+    /// Сессия, по которой стоп уже отправлен и ждём `goodbye`.
+    private var sessionAwaitingGoodbye: UInt64?
+    /// Стоп-команды, ожидающие `goodbye`: requestId → сессия. Поздний
+    /// `goodbye` закрывает свою сессию, а не ту, что успела начаться после.
+    private var pendingStops: [String: UInt64] = [:]
+    /// Сессия, чей вывод сейчас идёт от worker'а: транскрипт адресуется
+    /// только её подписчикам, иначе хвост прошлой записи попал бы в стрим
+    /// (и в `ContextStore`) следующей.
+    private var emittingSession: UInt64?
     private var capturing = false
+    /// `startCapture` ждёт `ready` от worker'а через continuation; в это окно
+    /// `capturing == false`, и `stopCapture` раньше был no-op — микрофон
+    /// оставался включённым вопреки явной остановке. Флаги закрывают окно.
+    private var startInFlight = false
+    private var stopRequestedDuringStart = false
     private var sessionStore: SessionStore?
     private var lastSessionURL: URL?
     /// Issue #57: once-per-spawn wire-version warning (см. MLXSupervisor).
@@ -66,10 +103,22 @@ public actor AudioSupervisor {
     /// наравне с MLX worker'ом.
     public init(
         workerExecutableURL: URL? = nil,
-        pidStore: FrozenPidsStore? = nil
+        pidStore: FrozenPidsStore? = nil,
+        sessionDirectory: URL = SessionStore.defaultDirectory
     ) {
         self.workerURL = workerExecutableURL ?? Self.defaultWorkerURL()
         self.pidStore = pidStore
+        self.sessionDirectory = sessionDirectory
+        let (events, continuation) = AsyncStream<WorkerPipeEvent>.makeStream(
+            bufferingPolicy: .unbounded
+        )
+        self.pipeEvents = events
+        self.pipeContinuation = continuation
+    }
+
+    deinit {
+        pipePump?.cancel()
+        pipeContinuation.finish()
     }
 
     public static func defaultWorkerURL() -> URL {
@@ -102,12 +151,15 @@ public actor AudioSupervisor {
         continuation.onTermination = { @Sendable [weak self] _ in
             Task { await self?.unsubscribe(id: id) }
         }
-        subscribers[id] = continuation
+        subscribers[id] = TranscriptSubscription(
+            continuation: continuation,
+            session: (capturing || startInFlight) ? captureSession : captureSession &+ 1
+        )
         return (stream, id)
     }
 
     public func unsubscribe(id: UUID) {
-        subscribers.removeValue(forKey: id)?.finish()
+        subscribers.removeValue(forKey: id)?.continuation.finish()
     }
 
     /// Запускает запись: spawn worker'а (если нет) + startCapture команда.
@@ -120,52 +172,116 @@ public actor AudioSupervisor {
         vadEnabled: Bool = true,
         vadRmsThreshold: Double = 0.008
     ) async throws {
+        guard !startInFlight else { throw AudioSupervisorError.startInProgress }
+        resolvePendingGoodbyeFallback()
         try ensureWorkerSpawned()
 
-        let id = UUID().uuidString
-        try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Void, any Error>) in
-            self.pendingRequests[id] = cont
-            do {
-                try self.sendCommand(.init(
-                    cmd: AudioWorkerCommand.startCapture,
-                    discordPid: discordPid,
-                    requestId: id,
-                    locale: locale,
-                    onDeviceRecognition: onDeviceRecognition,
-                    echoSuppression: echoSuppression,
-                    echoSuppressionTailMs: echoSuppressionTailMs,
-                    vadEnabled: vadEnabled,
-                    vadRmsThreshold: vadRmsThreshold
-                ))
-            } catch {
-                self.pendingRequests.removeValue(forKey: id)
-                cont.resume(throwing: error)
-            }
+        // Номер выделяется на КАЖДУЮ попытку, в том числе отменённую: иначе
+        // подписчик, пришедший после отмены, получил бы уже похороненный
+        // номер и был бы закрыт хвостом той попытки.
+        // Незакрытый стоп (его транскрипт и `goodbye` ещё в трубе) — такой
+        // же рестарт, как и старт поверх активной записи: `capturing` в этот
+        // момент уже false, но хвост прошлой записи ещё придёт.
+        let restarting = capturing || sessionAwaitingGoodbye != nil || !pendingStops.isEmpty
+        if restarting {
+            // Worker перезапускает захват сам, но подписчики прошлой сессии
+            // иначе остались бы открытыми и без событий до следующего стопа.
+            Self.log.notice("start during active capture — retiring session \(self.captureSession, privacy: .public)")
+            capturing = false
+            finishTranscriptSubscribers(upTo: captureSession)
         }
+        captureSession &+= 1
+        // При рестарте в трубе ещё может стоять хвост прошлой записи, а в
+        // событиях транскрипта нет номера сессии — до `ready` новой записи
+        // не помечаем ничего, иначе старые строки уедут новым подписчикам.
+        emittingSession = restarting ? nil : captureSession
+        startInFlight = true
+        stopRequestedDuringStart = false
+        defer { startInFlight = false }
+
+        let id = UUID().uuidString
+        do {
+            try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Void, any Error>) in
+                self.pendingRequests[id] = cont
+                do {
+                    try self.sendCommand(.init(
+                        cmd: AudioWorkerCommand.startCapture,
+                        discordPid: discordPid,
+                        requestId: id,
+                        locale: locale,
+                        onDeviceRecognition: onDeviceRecognition,
+                        echoSuppression: echoSuppression,
+                        echoSuppressionTailMs: echoSuppressionTailMs,
+                        vadEnabled: vadEnabled,
+                        vadRmsThreshold: vadRmsThreshold
+                    ))
+                } catch {
+                    self.pendingRequests.removeValue(forKey: id)
+                    cont.resume(throwing: error)
+                }
+            }
+        } catch {
+            stopRequestedDuringStart = false
+            // Попытка съела номер сессии: подписчики, ждавшие именно её,
+            // иначе молчали бы до следующего стопа — ретрай уедет на
+            // следующий номер, и транскрипт до них не дойдёт.
+            finishTranscriptSubscribers(upTo: captureSession)
+            throw error
+        }
+
+        if stopRequestedDuringStart {
+            // `stopCapture` пришёл, пока ждали `ready`: worker уже пишет —
+            // гасим его сразу, сессию не открываем, `capturing` не выставляем.
+            stopRequestedDuringStart = false
+            try? sendCommand(.init(cmd: AudioWorkerCommand.stopCapture, requestId: stopRequestId(for: captureSession)))
+            awaitGoodbyeThenFinishTranscripts(upTo: captureSession)
+            Self.log.notice("audio capture cancelled: stop requested during start")
+            return
+        }
+
         capturing = true
-        let sessionURL = SessionStore.makeURL()
-        if let store = try? SessionStore(at: sessionURL) {
+        emittingSession = captureSession
+        let requestedURL = SessionStore.makeURL(in: sessionDirectory)
+        do {
+            let store = try SessionStore(at: requestedURL)
             sessionStore = store
-            lastSessionURL = sessionURL
-        } else {
-            Self.log.error("session store creation failed: \(sessionURL.path, privacy: .public)")
+            // `store.url` может отличаться суффиксом `-N`, если имя было занято.
+            lastSessionURL = store.url
+        } catch {
+            Self.log.error("session store creation failed: \(requestedURL.path, privacy: .public): \(String(describing: error), privacy: .public)")
         }
         Self.log.notice("audio capture started discord_pid=\(discordPid.map(String.init) ?? "none") locale=\(locale) onDevice=\(onDeviceRecognition) echo=\(echoSuppression)")
     }
 
     /// Останавливает запись. Worker остаётся жить (готов к следующей сессии).
+    /// Если `startCapture` ещё ждёт `ready` — остановка откладывается до его
+    /// возвращения и выполняется там (см. `stopRequestedDuringStart`).
     public func stopCapture() async {
+        if startInFlight {
+            stopRequestedDuringStart = true
+            Self.log.notice("audio stop requested during start — deferred")
+            return
+        }
         guard capturing else { return }
-        try? sendCommand(.init(cmd: AudioWorkerCommand.stopCapture, requestId: UUID().uuidString))
+        try? sendCommand(.init(cmd: AudioWorkerCommand.stopCapture, requestId: stopRequestId(for: captureSession)))
         capturing = false
+        awaitGoodbyeThenFinishTranscripts(upTo: captureSession)
         Self.log.notice("audio capture stopped")
     }
 
     /// Полное завершение: shutdown worker'а + ожидание exit'а + SIGKILL fallback.
-    /// Симметрично `MLXSupervisor.unloadModel`.
+    /// Симметрично `MLXSupervisor.unloadModel`: shutdown-команда пишется с
+    /// таймаутом, чтобы зависший worker (полный pipe) не блокировал SIGKILL.
     public func shutdown() async {
-        guard host.currentPid() != nil else { return }
-        try? sendCommand(.init(cmd: AudioWorkerCommand.shutdown, requestId: UUID().uuidString))
+        guard let workerPid = host.currentPid() else { return }
+        if let data = try? JSONEncoder().encode(
+            AudioWorkerCommand(cmd: AudioWorkerCommand.shutdown, requestId: stopRequestId(for: captureSession))
+        ) {
+            let sent = await host.writeWithTimeout(data, timeout: .seconds(1))
+            if !sent {
+                Self.log.warning("shutdown command write stalled for pid=\(workerPid, privacy: .public) — falling back to exit wait + SIGKILL")
+            }
+        }
         let exited = await host.waitForExit(timeout: .seconds(3))
         if !exited {
             await host.sigkill()
@@ -176,6 +292,7 @@ public actor AudioSupervisor {
     // MARK: - Worker spawn
 
     private func ensureWorkerSpawned() throws {
+        ensurePipePump()
         do {
             try host.ensureSpawned()
         } catch WorkerProcessHost.WorkerProcessError.workerNotFound(let p) {
@@ -188,6 +305,33 @@ public actor AudioSupervisor {
     }
 
     // MARK: - stdin/stdout
+
+    /// Единственный потребитель `pipeEvents` — строки и exit доставляются в
+    /// actor в порядке pipe'а. Живёт всю жизнь supervisor'а, отменяется в deinit.
+    private func ensurePipePump() {
+        guard pipePump == nil else { return }
+        let events = pipeEvents
+        pipePump = Task { [weak self] in
+            for await event in events {
+                guard let self else { return }
+                switch event {
+                case .line(let line, let gen):
+                    guard await self.isCurrentGeneration(gen) else { continue }
+                    await self.handleLine(line)
+                case .exit(let pid, let status, let gen):
+                    guard await self.isCurrentGeneration(gen) else {
+                        Self.log.notice("dropping exit of stale audio worker gen=\(gen) pid=\(pid)")
+                        continue
+                    }
+                    await self.handleWorkerExit(pid: pid, status: status)
+                }
+            }
+        }
+    }
+
+    private func isCurrentGeneration(_ gen: UInt64) -> Bool {
+        host.currentGeneration() == gen
+    }
 
     private func sendCommand(_ cmd: AudioWorkerCommand) throws {
         let data = try JSONEncoder().encode(cmd)
@@ -225,13 +369,39 @@ public actor AudioSupervisor {
             if te.isFinal, let store = sessionStore {
                 Task { await store.append(speaker: te.speaker, text: te.text) }
             }
-            for cont in subscribers.values { cont.yield(te) }
+            guard let emitting = emittingSession else { break }
+            for sub in subscribers.values where sub.session == emitting {
+                sub.continuation.yield(te)
+            }
 
         case AudioWorkerEvent.error:
             if let id = event.requestId, let cont = pendingRequests.removeValue(forKey: id) {
                 cont.resume(throwing: AudioSupervisorError.captureFailed(event.message ?? "unknown"))
             } else {
                 Self.log.error("audio worker error: \(event.message ?? "unknown", privacy: .public)")
+            }
+
+        case AudioWorkerEvent.goodbye:
+            // Worker подтвердил конец записи (ответ на stopCapture/shutdown)
+            // и, по порядку протокола, уже отдал весь транскрипт до него.
+            // Здесь и закрываем подписки: иначе клиент ждёт вечно даже после
+            // остановки с другого соединения. Сессию берём по requestId той
+            // стоп-команды — опоздавший `goodbye` не должен обрывать запись,
+            // начатую после него. Без совпадения (shutdown, старый worker)
+            // закрываем текущую.
+            if let rid = event.requestId, let stopped = pendingStops.removeValue(forKey: rid) {
+                // Запись могли уже перезапустить: гасим флаг только если
+                // остановлена именно текущая сессия, иначе `stopCapture`
+                // следующей вернулся бы на `guard capturing`, пока worker
+                // продолжает писать.
+                if stopped >= captureSession { capturing = false }
+                finishTranscriptSubscribers(upTo: stopped)
+            } else if event.requestId == nil {
+                // Worker без requestId (legacy) — закрываем текущую.
+                capturing = false
+                finishTranscriptSubscribers(upTo: emittingSession ?? captureSession)
+            } else {
+                Self.log.notice("goodbye with unknown requestId — ignored")
             }
 
         case AudioWorkerEvent.pong:
@@ -242,6 +412,72 @@ public actor AudioSupervisor {
         default:
             break
         }
+    }
+
+    /// Конец потока транскрипта = `continuation.finish()`. Финальность
+    /// отдельного сегмента этим не является: остановка записи приходит не из
+    /// потока событий, а от `stopCapture`/`goodbye`, и без явного закрытия
+    /// подписчик (`froggy listen-stream`, MCP-консьюмер) висит после конца
+    /// записи — в том числе когда остановку инициировал другой клиент.
+    private func finishTranscriptSubscribers(upTo session: UInt64) {
+        transcriptFinishTask?.cancel()
+        transcriptFinishTask = nil
+        if sessionAwaitingGoodbye.map({ $0 <= session }) ?? false { sessionAwaitingGoodbye = nil }
+        if emittingSession.map({ $0 <= session }) ?? false { emittingSession = nil }
+        for (id, sub) in subscribers where sub.session <= session {
+            sub.continuation.finish()
+            subscribers.removeValue(forKey: id)
+        }
+    }
+
+    /// Все подписки разом — worker умер, следующей сессии у этих стримов нет.
+    private func finishAllTranscriptSubscribers() {
+        finishTranscriptSubscribers(upTo: .max)
+    }
+
+    /// Закрываем подписки не на самой команде стопа, а на `goodbye`: в
+    /// `pipeEvents` может стоять уже записанная worker'ом, но ещё не
+    /// доставленная строка транскрипта, а протокол упорядочен — `goodbye`
+    /// приходит после всего предыдущего вывода. Таймер — страховка: без
+    /// `goodbye` (старый worker, крэш между командой и ответом) подписчик
+    /// иначе висел бы снова.
+    private func awaitGoodbyeThenFinishTranscripts(upTo session: UInt64) {
+        sessionAwaitingGoodbye = session
+        guard subscribers.values.contains(where: { $0.session <= session }) else { return }
+        transcriptFinishTask?.cancel()
+        transcriptFinishTask = Task { [weak self] in
+            do {
+                try await Task.sleep(for: .seconds(2))
+            } catch {
+                return  // отменены `goodbye`-веткой: подписки уже закрыты
+            }
+            guard !Task.isCancelled else { return }
+            await self?.finishTranscriptsAfterGoodbyeTimeout(session: session)
+        }
+    }
+
+    /// requestId стоп-команды, по которому потом опознаётся её `goodbye`.
+    private func stopRequestId(for session: UInt64) -> String {
+        let id = UUID().uuidString
+        pendingStops[id] = session
+        return id
+    }
+
+    /// Незакрытая прошлая сессия разрешается на входе в новую запись: иначе
+    /// её таймер сработал бы уже во время новой. Закрываем только подписки
+    /// остановленной сессии — те, кто подписался на следующую, продолжают
+    /// ждать её транскрипт.
+    private func resolvePendingGoodbyeFallback() {
+        guard let pending = sessionAwaitingGoodbye else { return }
+        Self.log.notice("new capture before goodbye — closing subscriptions of session \(pending, privacy: .public)")
+        finishTranscriptSubscribers(upTo: pending)
+    }
+
+    private func finishTranscriptsAfterGoodbyeTimeout(session: UInt64) {
+        pendingStops = pendingStops.filter { $0.value != session }
+        guard subscribers.values.contains(where: { $0.session <= session }) else { return }
+        Self.log.warning("no goodbye within 2s after stop — closing transcript subscriptions")
+        finishTranscriptSubscribers(upTo: session)
     }
 
     // MARK: - Exit handling
@@ -266,9 +502,10 @@ public actor AudioSupervisor {
 
     private func cleanup() {
         pendingRequests.removeAll()
-        for cont in subscribers.values { cont.finish() }
-        subscribers.removeAll()
+        pendingStops.removeAll()
+        finishAllTranscriptSubscribers()
         capturing = false
+        stopRequestedDuringStart = false
         // Issue #57: следующий spawn — другой бинарь, мог отстать.
         wireVersionMismatchLogged = false
         host.cleanup()
