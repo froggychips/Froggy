@@ -122,6 +122,33 @@ final class PageoutChainTests: XCTestCase {
         XCTAssertFalse(jetsamCalled.value)
     }
 
+    /// ADR 0018: дефолтная стратегия — `.scratch`. machVM/jetsam без
+    /// привилегий гарантированно падают, поэтому по умолчанию не пробуются
+    /// и не портят счётчики.
+    func testDefaultPreferredIsScratch() async {
+        let machVMCalled = LockedFlag()
+        let jetsamCalled = LockedFlag()
+        let chain = PageoutChain(
+            machVM: FakePageoutImpl { _ in
+                machVMCalled.set()
+                return .failed(reason: "should not be called")
+            },
+            jetsam: FakePageoutImpl { _ in
+                jetsamCalled.set()
+                return .failed(reason: "should not be called")
+            },
+            scratch: FakePageoutImpl { _ in .success(strategyUsed: .scratch) }
+        )
+        let outcome = await chain.pageout(pid: 1234)
+        XCTAssertEqual(outcome, .success(strategyUsed: .scratch))
+        XCTAssertFalse(machVMCalled.value)
+        XCTAssertFalse(jetsamCalled.value)
+        let c = await chain.currentCounters()
+        XCTAssertEqual(c.jetsamAttempted, 0)
+        XCTAssertEqual(c.machVMAttempted, 0)
+        XCTAssertEqual(c.scratchSucceeded, 1)
+    }
+
     /// `.jetsam` preferred — не дёргает machVM, но при падении уходит в scratch.
     func testJetsamPreferredSkipsMachVM() async {
         let machVMCalled = LockedFlag()

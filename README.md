@@ -67,11 +67,14 @@ and `froggy-sre`, run `make ecosystem-smoke`.
   `freezeBundleIds` field is deprecated and aliased to tier-1 for
   backwards compatibility. See `docs/adr/0006-reactive-memory-pressure.md`.
 - **Forced pageout** after `SIGSTOP` — `SIGSTOP` alone does not return
-  RAM. `PageoutChain` tries one of three strategies: `machVM`
-  (`task_for_pid` + `mach_vm_behavior_set(VM_BEHAVIOR_PAGEOUT)`, requires
-  Developer ID + entitlement), `jetsam` (`memorystatus_control` idle band,
-  the default — no entitlements needed), `scratch` (alloc/memset/free).
-  Falls back through the chain. See `docs/adr/0007-pageout-strategies.md`.
+  RAM. `PageoutChain` knows three strategies, but only one works without
+  privileges: `scratch` (alloc/memset/free to provoke the compressor) is
+  the default. `jetsam` (`memorystatus_control` idle band) needs root or
+  the private `com.apple.private.memorystatus` entitlement; `machVM`
+  (`task_for_pid` + `mach_vm_behavior_set(VM_BEHAVIOR_PAGEOUT)`) needs SIP
+  off and a development kernel. Both are opt-in and fall back to `scratch`.
+  See `docs/adr/0018-pageout-unprivileged-scratch-only.md` (facts) and
+  `docs/adr/0007-pageout-strategies.md` (original design).
 - **Default-deny process classification** — only apps under
   `/Applications/`, `~/Applications/` or `/opt/homebrew/Cellar/` can be
   frozen. System binaries are never touched.
@@ -226,7 +229,7 @@ All fields are optional and have defaults:
   "freezeTier1BundleIds": ["com.spotify.client", "com.hnc.Discord"],
   "freezeTier2BundleIds": ["com.tinyspeck.slackmacgap", "notion.id"],
   "pressureCooldownSeconds": 60,
-  "pageoutStrategy": "jetsam",
+  "pageoutStrategy": "scratch",
   "pageoutScratchMB": 256,
   "mlxWorkerPath": "/usr/local/libexec/FroggyMLXWorker",
   "kvCacheBits": 8,

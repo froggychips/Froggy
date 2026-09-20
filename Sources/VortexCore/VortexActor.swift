@@ -5,6 +5,10 @@ import os
 public enum VortexError: Error, Sendable, CustomStringConvertible {
     case forbiddenPid(pid: Int32, reason: String)
     case killFailed(pid: Int32, errno: Int32)
+    /// За время `await` внутри `freezeProcess` кто-то вызвал thaw (Off,
+    /// sleep, frontmost) — SIGSTOP не посылаем, чтобы не оставить процесс
+    /// остановленным без записи в журнале.
+    case freezeAborted(pid: Int32, reason: String)
 
     public var description: String {
         switch self {
@@ -13,6 +17,8 @@ public enum VortexError: Error, Sendable, CustomStringConvertible {
         case let .killFailed(pid, errno):
             let msg = strerror(errno).map { String(validatingCString: $0) ?? "" } ?? ""
             return "kill(\(pid)) failed: errno=\(errno) (\(msg))"
+        case let .freezeAborted(pid, reason):
+            return "freeze of pid \(pid) aborted: \(reason)"
         }
     }
 }
@@ -31,6 +37,12 @@ public actor VortexActor {
     /// Mem-5: телеметрия freeze/thaw. nil — телеметрия выключена.
     private let ranker: FreezeRanker?
     private var suspendedPids: Set<Int32> = []
+    /// Растёт на каждом thaw. `freezeProcess` сравнивает значение до и после
+    /// `await pidStore.add`: actor реентерабелен на await, и если в это окно
+    /// вошёл `thawAll` (Off/sleep) или `thawProcess`, они уже сняли запись из
+    /// журнала — посылать SIGSTOP после этого нельзя: процесс остался бы
+    /// остановленным без следа, и recover() его бы не нашёл.
+    private var thawGeneration: UInt64 = 0
 
     public init(classifier: ProcessClassifier = ProcessClassifier(),
                 pidStore: FrozenPidsStore? = nil,
@@ -86,12 +98,24 @@ public actor VortexActor {
             executablePath = path
         }
 
+        // Recovery-запись — ДО SIGSTOP: если демон умрёт между сигналом и
+        // записью, процесс останется остановленным без следа в журнале.
+        // При провале kill запись снимаем. Entry сам снимает время старта
+        // процесса — по нему recover() отличит наш процесс от pid,
+        // переиспользованного после перезагрузки.
+        let generationBefore = thawGeneration
+        await pidStore?.add(.init(pid: pid, executablePath: executablePath))
+        guard thawGeneration == generationBefore else {
+            await pidStore?.remove(pid: pid)
+            throw VortexError.freezeAborted(pid: pid, reason: "thaw during freeze")
+        }
         let rc = kill(pid, SIGSTOP)
         if rc != 0 {
-            throw VortexError.killFailed(pid: pid, errno: errno)
+            let err = errno // читаем до await: после hop'а поток может быть другим
+            await pidStore?.remove(pid: pid)
+            throw VortexError.killFailed(pid: pid, errno: err)
         }
         suspendedPids.insert(pid)
-        await pidStore?.add(.init(pid: pid, executablePath: executablePath))
         Self.log.info("suspended pid=\(pid)")
 
         // Принудительный pageout: SIGSTOP сам по себе оставляет dirty pages
@@ -132,6 +156,7 @@ public actor VortexActor {
 
     /// Размораживает процесс (`SIGCONT`). Идемпотентно по pidStore.
     public func thawProcess(pid: Int32) async {
+        thawGeneration &+= 1
         let rc = kill(pid, SIGCONT)
         suspendedPids.remove(pid)
         await pidStore?.remove(pid: pid)
@@ -149,14 +174,17 @@ public actor VortexActor {
     }
 
     /// Размораживает все ранее остановленные процессы. Идемпотентно.
-    /// Сначала шлёт SIGCONT (главное), затем чистит persistent state.
+    /// Сначала шлёт SIGCONT (главное), затем чистит записи приложений в
+    /// persistent state. Записи воркеров (`category == "worker"`) остаются:
+    /// воркеры при thawAll живы, и их recovery-запись должна это пережить.
     public func thawAll() async {
+        thawGeneration &+= 1
         let count = suspendedPids.count
         for pid in suspendedPids {
             _ = kill(pid, SIGCONT)
         }
         suspendedPids.removeAll()
-        await pidStore?.clear()
+        await pidStore?.clearFrozen()
         if count > 0 {
             Self.log.info("thawAll: resumed \(count) processes")
         }

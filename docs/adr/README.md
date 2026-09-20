@@ -27,3 +27,6 @@ Format: short — Status / Context / Decision / Consequences / Alternatives.
 * [0013 — Metallib missing in SwiftPM release build](0013-metallib-missing-in-swiftpm-release.md)
 * [0014 — Design-doc'и не гонятся вперёд имплементации](0014-design-docs-after-implementation.md)
 * [0015 — Frontmost-veto, minimal scope (NSWorkspace only)](0015-frontmost-veto-minimal.md)
+* [0016 — Cloud routing via froggy-mcp — data flow and privacy boundaries](0016-froggy-mcp-cloud-routing-privacy.md)
+* [0017 — Active/Paused toggle for the daemon](0017-active-mode-toggle.md)
+* [0018 — Unprivileged pageout is unreachable: `scratch` is the only working strategy](0018-pageout-unprivileged-scratch-only.md)
