@@ -80,6 +80,9 @@ public actor AudioSupervisor {
     private var captureSession: UInt64 = 0
     /// Сессия, по которой стоп уже отправлен и ждём `goodbye`.
     private var sessionAwaitingGoodbye: UInt64?
+    /// Стоп-команды, ожидающие `goodbye`: requestId → сессия. Поздний
+    /// `goodbye` закрывает свою сессию, а не ту, что успела начаться после.
+    private var pendingStops: [String: UInt64] = [:]
     /// Сессия, чей вывод сейчас идёт от worker'а: транскрипт адресуется
     /// только её подписчикам, иначе хвост прошлой записи попал бы в стрим
     /// (и в `ContextStore`) следующей.
@@ -176,6 +179,13 @@ public actor AudioSupervisor {
         // Номер выделяется на КАЖДУЮ попытку, в том числе отменённую: иначе
         // подписчик, пришедший после отмены, получил бы уже похороненный
         // номер и был бы закрыт хвостом той попытки.
+        if capturing {
+            // Worker перезапускает захват сам, но подписчики прошлой сессии
+            // иначе остались бы открытыми и без событий до следующего стопа.
+            Self.log.notice("start during active capture — retiring session \(self.captureSession, privacy: .public)")
+            capturing = false
+            finishTranscriptSubscribers(upTo: captureSession)
+        }
         captureSession &+= 1
         emittingSession = captureSession
         startInFlight = true
@@ -205,6 +215,10 @@ public actor AudioSupervisor {
             }
         } catch {
             stopRequestedDuringStart = false
+            // Попытка съела номер сессии: подписчики, ждавшие именно её,
+            // иначе молчали бы до следующего стопа — ретрай уедет на
+            // следующий номер, и транскрипт до них не дойдёт.
+            finishTranscriptSubscribers(upTo: captureSession)
             throw error
         }
 
@@ -212,7 +226,7 @@ public actor AudioSupervisor {
             // `stopCapture` пришёл, пока ждали `ready`: worker уже пишет —
             // гасим его сразу, сессию не открываем, `capturing` не выставляем.
             stopRequestedDuringStart = false
-            try? sendCommand(.init(cmd: AudioWorkerCommand.stopCapture, requestId: UUID().uuidString))
+            try? sendCommand(.init(cmd: AudioWorkerCommand.stopCapture, requestId: stopRequestId(for: captureSession)))
             awaitGoodbyeThenFinishTranscripts(upTo: captureSession)
             Self.log.notice("audio capture cancelled: stop requested during start")
             return
@@ -241,7 +255,7 @@ public actor AudioSupervisor {
             return
         }
         guard capturing else { return }
-        try? sendCommand(.init(cmd: AudioWorkerCommand.stopCapture, requestId: UUID().uuidString))
+        try? sendCommand(.init(cmd: AudioWorkerCommand.stopCapture, requestId: stopRequestId(for: captureSession)))
         capturing = false
         awaitGoodbyeThenFinishTranscripts(upTo: captureSession)
         Self.log.notice("audio capture stopped")
@@ -363,9 +377,13 @@ public actor AudioSupervisor {
             // Worker подтвердил конец записи (ответ на stopCapture/shutdown)
             // и, по порядку протокола, уже отдал весь транскрипт до него.
             // Здесь и закрываем подписки: иначе клиент ждёт вечно даже после
-            // остановки с другого соединения.
+            // остановки с другого соединения. Сессию берём по requestId той
+            // стоп-команды — опоздавший `goodbye` не должен обрывать запись,
+            // начатую после него. Без совпадения (shutdown, старый worker)
+            // закрываем текущую.
+            let stopped = event.requestId.flatMap { pendingStops.removeValue(forKey: $0) }
             capturing = false
-            finishTranscriptSubscribers(upTo: sessionAwaitingGoodbye ?? captureSession)
+            finishTranscriptSubscribers(upTo: stopped ?? emittingSession ?? captureSession)
 
         case AudioWorkerEvent.pong:
             if let id = event.requestId, let cont = pendingRequests.removeValue(forKey: id) {
@@ -387,6 +405,7 @@ public actor AudioSupervisor {
         transcriptFinishTask = nil
         if sessionAwaitingGoodbye.map({ $0 <= session }) ?? false { sessionAwaitingGoodbye = nil }
         if emittingSession.map({ $0 <= session }) ?? false { emittingSession = nil }
+        pendingStops = pendingStops.filter { $0.value > session }
         for (id, sub) in subscribers where sub.session <= session {
             sub.continuation.finish()
             subscribers.removeValue(forKey: id)
@@ -417,6 +436,13 @@ public actor AudioSupervisor {
             guard !Task.isCancelled else { return }
             await self?.finishTranscriptsAfterGoodbyeTimeout(session: session)
         }
+    }
+
+    /// requestId стоп-команды, по которому потом опознаётся её `goodbye`.
+    private func stopRequestId(for session: UInt64) -> String {
+        let id = UUID().uuidString
+        pendingStops[id] = session
+        return id
     }
 
     /// Незакрытая прошлая сессия разрешается на входе в новую запись: иначе
