@@ -32,6 +32,11 @@ public protocol MemoryPressureSource: Sendable {
 /// Подписка нескольких слушателей через broadcast.
 public final class DispatchMemoryPressureSource: MemoryPressureSource, @unchecked Sendable {
     private static let log = Logger(subsystem: "com.froggychips.froggy", category: "pressure-source")
+    /// Signposter для time-correlated визуализации в Instruments.
+    /// Каждое событие давления — точка на timeline; см. ADR-кандидат
+    /// "observability via OS signposts".
+    private static let signposter = OSSignposter(subsystem: "com.froggychips.froggy", category: "pressure")
+    private static let poi = OSSignposter(subsystem: "com.froggychips.froggy", category: "PointsOfInterest")
 
     private let lock = NSLock()
     private var continuations: [UUID: AsyncStream<MemoryPressureLevel>.Continuation] = [:]
@@ -51,6 +56,12 @@ public final class DispatchMemoryPressureSource: MemoryPressureSource, @unchecke
             else if mask.contains(.warning) { level = .warning }
             else { level = .normal }
             Self.log.info("dispatch pressure event: \(level.rawValue, privacy: .public)")
+            // Signpost-event: видно как точку в Instruments timeline.
+            // Параллельный POI-event для standard PointsOfInterest track.
+            Self.signposter.emitEvent("pressure-level",
+                                       "level=\(level.rawValue, privacy: .public)")
+            Self.poi.emitEvent("pressure_level",
+                                "level=\(level.rawValue, privacy: .public)")
             self.broadcast(level)
         }
         src.resume()
