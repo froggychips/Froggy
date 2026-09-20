@@ -7,7 +7,19 @@ set -euo pipefail
 INSTALL_BIN="${INSTALL_BIN:-/usr/local/bin}"
 INSTALL_LIBEXEC="${INSTALL_LIBEXEC:-/usr/local/libexec}"
 LAUNCHAGENT_DIR="$HOME/Library/LaunchAgents"
-PLIST="com.froggychips.froggy.plist"
+# Label сервиса в launchd — без суффикса «.plist». Раньше bootout звался с
+# суффиксом, попадал в `2>/dev/null || true` и никогда не срабатывал: бинарники
+# менялись под живым демоном, а следующий bootstrap падал «already loaded».
+LABEL="com.froggychips.froggy"
+PLIST="$LABEL.plist"
+
+# Приватный рабочий каталог (mktemp под $TMPDIR пользователя). Скачивание и
+# распаковка идут ТОЛЬКО сюда. Раньше zip качался в общий /tmp и выбирался
+# `ls /tmp/froggy-*.zip | sort -V | tail -1` — другой локальный пользователь
+# мог заранее положить туда froggy-v9999-arm64.zip, и он ставился через sudo.
+# Заодно чинит повторный запуск: gh не перезаписывает уже существующий файл.
+WORK=$(mktemp -d)
+trap 'rm -rf "$WORK"' EXIT
 
 # --- найти / скачать zip ---
 if [[ $# -ge 1 ]]; then
@@ -18,19 +30,39 @@ else
         exit 1
     fi
     echo "Скачиваю последний релиз..."
-    gh release download --repo froggychips/Froggy --pattern "*.zip" --dir /tmp
-    ZIP=$(ls /tmp/froggy-*-arm64.zip | sort -V | tail -1)
+    mkdir -p "$WORK/dl"
+    gh release download --repo froggychips/Froggy --pattern "froggy-*-arm64.zip" --dir "$WORK/dl"
+    shopt -s nullglob
+    candidates=("$WORK"/dl/froggy-*-arm64.zip)
+    shopt -u nullglob
+    if [[ ${#candidates[@]} -ne 1 ]]; then
+        echo "Ожидал ровно один артефакт froggy-*-arm64.zip, получил ${#candidates[@]}" >&2
+        exit 1
+    fi
+    ZIP="${candidates[0]}"
 fi
 
 [[ -f "$ZIP" ]] || { echo "Файл не найден: $ZIP" >&2; exit 1; }
 
-TMPDIR=$(mktemp -d)
-trap 'rm -rf "$TMPDIR"' EXIT
-
 echo "Распаковываю $ZIP..."
-unzip -q "$ZIP" -d "$TMPDIR"
-DIST=$(ls "$TMPDIR")
-BASE="$TMPDIR/$DIST"
+mkdir -p "$WORK/unpacked"
+unzip -q "$ZIP" -d "$WORK/unpacked"
+shopt -s nullglob
+dists=("$WORK"/unpacked/*/)
+shopt -u nullglob
+if [[ ${#dists[@]} -ne 1 ]]; then
+    echo "Ожидал один каталог в архиве, получил ${#dists[@]}" >&2
+    exit 1
+fi
+BASE="${dists[0]%/}"
+
+# --- сначала выгружаем работающий демон ---
+# Иначе бинарники заменяются под живым процессом (старый демон продолжает
+# работать с новыми worker-бинарями), а bootstrap ниже падает.
+if launchctl print "gui/$(id -u)/$LABEL" >/dev/null 2>&1; then
+    echo "Выгружаю работающий LaunchAgent $LABEL..."
+    launchctl bootout "gui/$(id -u)/$LABEL"
+fi
 
 # --- бинари ---
 echo "Устанавливаю CLI в $INSTALL_BIN..."
@@ -47,7 +79,7 @@ sudo mkdir -p "$INSTALL_LIBEXEC"
 RESOURCES_DST="$INSTALL_LIBEXEC/Resources"
 sudo mkdir -p "$RESOURCES_DST"
 [[ -f "$BASE/Resources/default.metallib" ]] && \
-    sudo cp "$BASE/Resources/default.metallib" "$RESOURCES_DST/default.metallib"
+    sudo install -m 644 "$BASE/Resources/default.metallib" "$RESOURCES_DST/default.metallib"
 
 # --- LaunchAgent ---
 mkdir -p "$LAUNCHAGENT_DIR"
@@ -57,7 +89,6 @@ if [[ -f "$PLIST_SRC" ]]; then
     # Подставляем реальный путь к бинарю
     sed -i '' "s|/usr/local/libexec/FroggyDaemon|$INSTALL_LIBEXEC/FroggyDaemon|g" \
         "$LAUNCHAGENT_DIR/$PLIST"
-    launchctl bootout "gui/$(id -u)/$PLIST" 2>/dev/null || true
     launchctl bootstrap "gui/$(id -u)" "$LAUNCHAGENT_DIR/$PLIST"
     echo "LaunchAgent загружен."
 fi
