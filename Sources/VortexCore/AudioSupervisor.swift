@@ -67,7 +67,19 @@ public actor AudioSupervisor {
     /// (старая версия, крэш между командой и ответом). См. `awaitGoodbye`.
     private var transcriptFinishTask: Task<Void, Never>?
     private var pendingRequests: [String: CheckedContinuation<Void, any Error>] = [:]
-    private var subscribers: [UUID: AsyncStream<TranscriptEvent>.Continuation] = [:]
+    /// Подписчик и сессия, чей транскрипт он ждёт: текущая, если запись идёт,
+    /// иначе следующая — подписаться до `startCapture` разрешено (так делает
+    /// заранее запущенный `froggy listen-stream`). Номер нужен, чтобы стоп
+    /// одной сессии не закрывал стрим, открытый для другой.
+    private struct TranscriptSubscription {
+        let continuation: AsyncStream<TranscriptEvent>.Continuation
+        let session: UInt64
+    }
+    private var subscribers: [UUID: TranscriptSubscription] = [:]
+    /// Номер текущей (или последней) записи; растёт на каждом старте.
+    private var captureSession: UInt64 = 0
+    /// Сессия, по которой стоп уже отправлен и ждём `goodbye`.
+    private var sessionAwaitingGoodbye: UInt64?
     private var capturing = false
     /// `startCapture` ждёт `ready` от worker'а через continuation; в это окно
     /// `capturing == false`, и `stopCapture` раньше был no-op — микрофон
@@ -132,12 +144,15 @@ public actor AudioSupervisor {
         continuation.onTermination = { @Sendable [weak self] _ in
             Task { await self?.unsubscribe(id: id) }
         }
-        subscribers[id] = continuation
+        subscribers[id] = TranscriptSubscription(
+            continuation: continuation,
+            session: capturing ? captureSession : captureSession + 1
+        )
         return (stream, id)
     }
 
     public func unsubscribe(id: UUID) {
-        subscribers.removeValue(forKey: id)?.finish()
+        subscribers.removeValue(forKey: id)?.continuation.finish()
     }
 
     /// Запускает запись: spawn worker'а (если нет) + startCapture команда.
@@ -189,12 +204,13 @@ public actor AudioSupervisor {
             // гасим его сразу, сессию не открываем, `capturing` не выставляем.
             stopRequestedDuringStart = false
             try? sendCommand(.init(cmd: AudioWorkerCommand.stopCapture, requestId: UUID().uuidString))
-            awaitGoodbyeThenFinishTranscripts()
+            awaitGoodbyeThenFinishTranscripts(upTo: captureSession &+ 1)
             Self.log.notice("audio capture cancelled: stop requested during start")
             return
         }
 
         capturing = true
+        captureSession &+= 1
         let requestedURL = SessionStore.makeURL(in: sessionDirectory)
         do {
             let store = try SessionStore(at: requestedURL)
@@ -219,7 +235,7 @@ public actor AudioSupervisor {
         guard capturing else { return }
         try? sendCommand(.init(cmd: AudioWorkerCommand.stopCapture, requestId: UUID().uuidString))
         capturing = false
-        awaitGoodbyeThenFinishTranscripts()
+        awaitGoodbyeThenFinishTranscripts(upTo: captureSession)
         Self.log.notice("audio capture stopped")
     }
 
@@ -323,7 +339,7 @@ public actor AudioSupervisor {
             if te.isFinal, let store = sessionStore {
                 Task { await store.append(speaker: te.speaker, text: te.text) }
             }
-            for cont in subscribers.values { cont.yield(te) }
+            for sub in subscribers.values { sub.continuation.yield(te) }
 
         case AudioWorkerEvent.error:
             if let id = event.requestId, let cont = pendingRequests.removeValue(forKey: id) {
@@ -338,7 +354,7 @@ public actor AudioSupervisor {
             // Здесь и закрываем подписки: иначе клиент ждёт вечно даже после
             // остановки с другого соединения.
             capturing = false
-            finishTranscriptSubscribers()
+            finishTranscriptSubscribers(upTo: sessionAwaitingGoodbye ?? captureSession)
 
         case AudioWorkerEvent.pong:
             if let id = event.requestId, let cont = pendingRequests.removeValue(forKey: id) {
@@ -355,11 +371,19 @@ public actor AudioSupervisor {
     /// потока событий, а от `stopCapture`/`goodbye`, и без явного закрытия
     /// подписчик (`froggy listen-stream`, MCP-консьюмер) висит после конца
     /// записи — в том числе когда остановку инициировал другой клиент.
-    private func finishTranscriptSubscribers() {
+    private func finishTranscriptSubscribers(upTo session: UInt64) {
         transcriptFinishTask?.cancel()
         transcriptFinishTask = nil
-        for cont in subscribers.values { cont.finish() }
-        subscribers.removeAll()
+        if sessionAwaitingGoodbye.map({ $0 <= session }) ?? false { sessionAwaitingGoodbye = nil }
+        for (id, sub) in subscribers where sub.session <= session {
+            sub.continuation.finish()
+            subscribers.removeValue(forKey: id)
+        }
+    }
+
+    /// Все подписки разом — worker умер, следующей сессии у этих стримов нет.
+    private func finishAllTranscriptSubscribers() {
+        finishTranscriptSubscribers(upTo: .max)
     }
 
     /// Закрываем подписки не на самой команде стопа, а на `goodbye`: в
@@ -368,8 +392,9 @@ public actor AudioSupervisor {
     /// приходит после всего предыдущего вывода. Таймер — страховка: без
     /// `goodbye` (старый worker, крэш между командой и ответом) подписчик
     /// иначе висел бы снова.
-    private func awaitGoodbyeThenFinishTranscripts() {
-        guard !subscribers.isEmpty else { return }
+    private func awaitGoodbyeThenFinishTranscripts(upTo session: UInt64) {
+        sessionAwaitingGoodbye = session
+        guard subscribers.values.contains(where: { $0.session <= session }) else { return }
         transcriptFinishTask?.cancel()
         transcriptFinishTask = Task { [weak self] in
             do {
@@ -378,24 +403,24 @@ public actor AudioSupervisor {
                 return  // отменены `goodbye`-веткой: подписки уже закрыты
             }
             guard !Task.isCancelled else { return }
-            await self?.finishTranscriptsAfterGoodbyeTimeout()
+            await self?.finishTranscriptsAfterGoodbyeTimeout(session: session)
         }
     }
 
-    /// Незакрытая прошлая сессия закрывается на входе в новую запись:
-    /// подписчики лежат в одном словаре, и таймер остановленной сессии иначе
-    /// оборвал бы стрим уже начавшейся (worker без `goodbye` + рестарт
-    /// быстрее двух секунд).
+    /// Незакрытая прошлая сессия разрешается на входе в новую запись: иначе
+    /// её таймер сработал бы уже во время новой. Закрываем только подписки
+    /// остановленной сессии — те, кто подписался на следующую, продолжают
+    /// ждать её транскрипт.
     private func resolvePendingGoodbyeFallback() {
-        guard transcriptFinishTask != nil else { return }
-        Self.log.notice("new capture before goodbye — closing previous transcript subscriptions")
-        finishTranscriptSubscribers()
+        guard let pending = sessionAwaitingGoodbye else { return }
+        Self.log.notice("new capture before goodbye — closing subscriptions of session \(pending, privacy: .public)")
+        finishTranscriptSubscribers(upTo: pending)
     }
 
-    private func finishTranscriptsAfterGoodbyeTimeout() {
-        guard !subscribers.isEmpty else { return }
+    private func finishTranscriptsAfterGoodbyeTimeout(session: UInt64) {
+        guard subscribers.values.contains(where: { $0.session <= session }) else { return }
         Self.log.warning("no goodbye within 2s after stop — closing transcript subscriptions")
-        finishTranscriptSubscribers()
+        finishTranscriptSubscribers(upTo: session)
     }
 
     // MARK: - Exit handling
@@ -420,7 +445,7 @@ public actor AudioSupervisor {
 
     private func cleanup() {
         pendingRequests.removeAll()
-        finishTranscriptSubscribers()
+        finishAllTranscriptSubscribers()
         capturing = false
         stopRequestedDuringStart = false
         // Issue #57: следующий spawn — другой бинарь, мог отстать.

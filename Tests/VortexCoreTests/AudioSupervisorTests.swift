@@ -185,6 +185,36 @@ final class AudioSupervisorTests: XCTestCase {
         await supervisor.shutdown()
     }
 
+    /// Подписка, оформленная между записями, относится к следующей сессии:
+    /// незакрытый хвост предыдущей (её стоп, её goodbye-страховка) не должен
+    /// оборвать стрим, который ждёт новую запись.
+    func testSubscriptionBetweenSessionsSurvivesPreviousStop() async throws {
+        let supervisor = makeSupervisor()
+        try await supervisor.startCapture(discordPid: nil)
+        await supervisor.stopCapture()
+
+        let (stream, subID) = await supervisor.subscribeToTranscripts()
+        try await supervisor.startCapture(discordPid: nil)
+
+        let received: String? = try await withThrowingTaskGroup(of: String?.self) { group in
+            group.addTask {
+                for await event in stream { return event.text }
+                return nil
+            }
+            group.addTask {
+                try await Task.sleep(for: .seconds(3))
+                return nil
+            }
+            let first = try await group.next() ?? nil
+            group.cancelAll()
+            return first
+        }
+
+        XCTAssertNotNil(received, "подписка до старта должна получать транскрипт новой записи")
+        await supervisor.unsubscribe(id: subID)
+        await supervisor.shutdown()
+    }
+
     /// `stopCapture` во время pending `startCapture` раньше был no-op
     /// (`capturing == false`), и микрофон оставался включённым. Теперь
     /// остановка откладывается и выполняется по возвращении `ready`.
